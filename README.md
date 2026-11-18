@@ -16,10 +16,10 @@ python -m venv .venv
 
 ## 更新与发布
 
-当前仓库提供源码。Windows 打包可使用 `scripts/syncthing-selector.spec`，它需要官方 Syncthing Windows x64 归档中的文件和 `scripts/build_overlays.ps1` 生成的角标组件。
+Windows x64 安装程序见 [GitHub Releases](https://github.com/qiuzhijin/UGSync-Syncthing-Selector/releases)。旧 ZIP 版本的用户首次升级需退出旧客户端并运行完整安装程序。安装到原程序目录可沿用既有的快捷方式和自启动路径。安装前如正在同步，请在托盘退出客户端并停止本机引擎。
 
-发布构建可通过 `UGSYNC_UPDATE_CHANNEL_FILE` 指向名为 `update-channel.json` 的文件，包含 `repository`（`owner/repo`）、`version`（例如 `v0.1.0-preview.25`）和 `signer_certificate_sha256`（Windows 代码签名证书 DER 字节的 SHA-256）。配置后，客户端可以从托盘检查更新。用户确认后，客户端下载 `UGSync-Setup-<版本标签>-x64.exe`，核对 GitHub 的资源摘要和 Authenticode 签名者，启动安装程序。
+安装版支持在托盘菜单检查更新。WinSparkle 用内置 EdDSA 公钥验证新版 EXE，再启动安装程序。预览版安装程序可能显示 Windows「未知发布者」，其项目级更新签名由 UGSync 验证。
 
-当前没有配置正式的签名安装包，更新入口需要在发布构建时启用。
+打包使用 `scripts/syncthing-selector.spec` 和 `scripts/ugsync-setup.iss`。前者需要官方 Syncthing Windows x64 归档和 `scripts/build_overlays.ps1` 生成的角标组件。配置 `UGSYNC_WINSPARKLE_DLL` 与 `UGSYNC_WINSPARKLE_CHANNEL` 可把 WinSparkle x64 DLL 和 `scripts/winsparkle-channel.json` 的公开更新配置加入构建。Inno Setup 接收 `/DBundleDir=<完整客户端路径>` 与 `/DProductVersion=<版本>`。程序目录须包含项目许可证和 [第三方材料](docs/selector-third-party-sources.md)。
 
 项目自有代码采用 [MIT](LICENSE)。Syncthing、Qt for Python 等第三方软件遵循各自的许可。同步会传播选中范围内的删除，重要数据应另有独立备份。

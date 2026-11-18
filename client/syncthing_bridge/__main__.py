@@ -15,7 +15,7 @@ from syncthing_bridge.activity import ActivityPanel, ReadActivity
 from syncthing_bridge.overlays import OverlayPublisher
 from syncthing_bridge.nas_credentials import NasCredentialError, NasCredentialStore
 from syncthing_bridge.overlay_install import OverlayInstallError, install_overlay_extension, overlay_extension_installed
-from syncthing_bridge.update_ui import Updates
+from syncthing_bridge.winsparkle import configure_updates
 
 
 class Window(QMainWindow):
@@ -124,7 +124,12 @@ class Window(QMainWindow):
         self.tray.setToolTip('文件夹同步 · Syncthing')
         menu = QMenu(self)
         menu.addAction('打开同步窗口', self.show_window)
-        self.software_updates = Updates(self, menu)
+        try:
+            self.software_updates = configure_updates(self, menu)
+        except (OSError, ValueError, AttributeError):
+            if '--startup-check' in sys.argv:
+                raise
+            self.status.setText('软件更新组件暂时不可用。')
         menu.addAction('退出（同时停止同步）', lambda: self.run(self.exit_with_engine))
         self.tray.setContextMenu(menu)
         self.tray.activated.connect(self.tray_activated)
