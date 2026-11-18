@@ -1,0 +1,5 @@
+LIBRARY UGSyncOverlay
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE
+    OverlayStateAt

@@ -1,0 +1,18 @@
+services:
+  syncthing:
+    image: ${SYNCTHING_IMAGE:?Set a tested syncthing/syncthing tag or digest}
+    hostname: ugsync-nas
+    environment:
+      PUID: "${NAS_UID:-1000}"
+      PGID: "${NAS_GID:-10}"
+      UMASK: "002"
+      STGUIADDRESS: "127.0.0.1:8384"
+    network_mode: host
+    volumes:
+      - type: bind
+        source: ${SYNCTHING_STATE:?Set a dedicated persistent config directory}
+        target: /var/syncthing
+      - type: bind
+        source: ${SYNCTHING_DATA:?Set a dedicated test directory initially}
+        target: /data
+    restart: unless-stopped

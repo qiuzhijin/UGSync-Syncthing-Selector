@@ -1,0 +1,331 @@
+from types import SimpleNamespace
+
+from PySide6.QtCore import Qt
+from PySide6.QtWidgets import QApplication, QLineEdit
+
+from syncthing_bridge.__main__ import Window
+from syncthing_bridge.activity import ReadActivity
+
+
+def test_lazy_children_inherit_selection_and_can_be_excluded():
+    app = QApplication.instance() or QApplication([])
+    class Engine:
+        def browse(self, folder, prefix=''):
+            return [{'name': '工作' if not prefix else '缓存',
+                     'type': 'FILE_INFO_TYPE_DIRECTORY'}]
+        def close(self):
+            pass
+    window = Window()
+    window.api = Engine()
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    window.populate(None, '', False)
+    parent = window.tree.topLevelItem(0)
+    parent.setCheckState(0, Qt.CheckState.Checked)
+    window.expand(parent)
+    child = parent.child(0)
+    assert child.checkState(0) == Qt.CheckState.Checked
+    child.setCheckState(0, Qt.CheckState.Unchecked)
+    assert parent.checkState(0) == Qt.CheckState.PartiallyChecked
+    assert child.data(0, Qt.ItemDataRole.UserRole) == '工作/缓存'
+    window.exiting = True
+    window.close()
+
+
+def test_direct_child_selection_keeps_siblings_excluded_and_restores_partial_parent():
+    app = QApplication.instance() or QApplication([])
+    class Engine:
+        def browse(self, folder, prefix=''):
+            names = ['工作'] if not prefix else ['项目A', '项目B']
+            return [{'name': name, 'type': 'FILE_INFO_TYPE_DIRECTORY'} for name in names]
+        def close(self):
+            pass
+    window = Window()
+    window.api = Engine()
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    window.populate(None, '', False)
+    parent = window.tree.topLevelItem(0)
+    window.expand(parent)
+    assert not window.choices
+    parent.child(0).setCheckState(0, Qt.CheckState.Checked)
+    assert window.choices == {'工作/项目A': True}
+    assert parent.checkState(0) == Qt.CheckState.PartiallyChecked
+    assert parent.child(1).checkState(0) == Qt.CheckState.Unchecked
+    window.tree.clear()
+    window.populate(None, '', False)
+    parent = window.tree.topLevelItem(0)
+    assert parent.checkState(0) == Qt.CheckState.PartiallyChecked
+    window.expand(parent)
+    assert parent.child(0).checkState(0) == Qt.CheckState.Checked
+    assert parent.child(1).checkState(0) == Qt.CheckState.Unchecked
+    parent.setCheckState(0, Qt.CheckState.Checked)
+    assert window.choices == {'工作': True}
+    assert all(parent.child(i).checkState(0) == Qt.CheckState.Checked for i in range(2))
+    window.exiting = True
+    window.close()
+
+
+def test_connect_local_attaches_without_starting_second_engine(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    called = []
+    monkeypatch.setattr(ui, 'local_credentials', lambda: ('http://127.0.0.1:8384', 'synthetic'))
+    monkeypatch.setattr(ui, 'engine_available', lambda endpoint: True)
+    monkeypatch.setattr(ui, 'launch_engine', lambda: called.append('spawn'))
+    monkeypatch.setattr(window, 'finish_local_connection', lambda: called.append('connect'))
+    window.connect_local()
+    assert called == ['connect']
+    window.exiting = True
+    window.close()
+
+
+def test_close_hides_to_tray_without_closing_connection(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    closed = []
+    class Engine:
+        def close(self):
+            closed.append(True)
+    window.api = Engine()
+    monkeypatch.setattr(window.tray, 'isVisible', lambda: True)
+    window.show()
+    window.close()
+    assert not window.isVisible()
+    assert not closed and window.timer.isActive()
+    window.exiting = True
+    window.close()
+    assert closed == [True]
+
+
+def test_missing_engine_starts_once_while_connection_pending(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    called = []
+    monkeypatch.setattr(ui, 'local_credentials', lambda: ('http://127.0.0.1:8384', 'synthetic'))
+    monkeypatch.setattr(ui, 'engine_available', lambda endpoint: False)
+    monkeypatch.setattr(ui, 'launch_engine', lambda: called.append('spawn') or object())
+    monkeypatch.setattr(ui.QTimer, 'singleShot', lambda *args: None)
+    window.connect_local()
+    window.connect_local()
+    assert called == ['spawn'] and window.starting
+    window.exiting = True
+    window.close()
+
+
+def test_exit_stops_local_engine_before_interface(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    calls = []
+    class Engine:
+        def __init__(self, endpoint, key):
+            assert endpoint == 'http://127.0.0.1:8384'
+        def request(self, method, route):
+            calls.append((method, route))
+        def close(self):
+            calls.append('close')
+    monkeypatch.setattr(ui, 'Syncthing', Engine)
+    monkeypatch.setattr(ui, 'local_credentials', lambda: ('http://127.0.0.1:8384', 'synthetic'))
+    monkeypatch.setattr(ui, 'engine_available', lambda endpoint: True)
+    monkeypatch.setattr(window, 'quit_interface', lambda: calls.append('quit'))
+    window.exit_with_engine()
+    assert calls == [('POST', '/rest/system/shutdown'), 'close', 'quit']
+    actions = [action.text() for action in window.tray.contextMenu().actions()]
+    assert actions == ['打开同步窗口', '退出（同时停止同步）']
+    window.exiting = True
+    window.close()
+
+
+def test_exit_still_works_when_engine_already_stopped(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    calls = []
+    monkeypatch.setattr(ui, 'local_credentials', lambda: ('http://127.0.0.1:8384', 'synthetic'))
+    monkeypatch.setattr(ui, 'engine_available', lambda endpoint: False)
+    monkeypatch.setattr(window, 'quit_interface', lambda: calls.append('quit'))
+    window.exit_with_engine()
+    assert calls == ['quit']
+    window.exiting = True
+    window.close()
+
+
+def test_progress_bar_shows_upload_still_pending():
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    class Engine:
+        def progress_snapshot(self, folder):
+            return {'local': {'inSyncBytes': 100, 'needBytes': 0, 'needFiles': 0,
+                              'needTotalItems': 0, 'state': 'idle'},
+                    'peers': [{'connected': True, 'remoteState': 'valid',
+                               'completion': 60, 'needItems': 2}], 'traffic': {}}
+        def close(self):
+            pass
+    window.api = Engine()
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    window.refresh_status()
+    assert window.progress_bar.value() == 600
+    assert '60.0%' in window.status.text()
+    assert '对端待接收 2 项' in window.progress_detail.text()
+    window.exiting = True
+    window.close()
+
+
+def test_enabling_overlays_installs_extension_before_starting_publisher(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    calls = []
+
+    class Publisher:
+        def __init__(self, endpoint, key):
+            calls.append(('publisher', endpoint, key))
+        def start(self):
+            calls.append('start')
+        def stop(self, **kwargs):
+            calls.append('stop')
+
+    monkeypatch.setattr(ui, 'overlay_extension_installed', lambda: False)
+    monkeypatch.setattr(ui, 'install_overlay_extension', lambda: calls.append('install') or True)
+    monkeypatch.setattr(ui, 'OverlayPublisher', Publisher)
+    monkeypatch.setattr(ui.sys, 'platform', 'win32')
+    window.api = SimpleNamespace(close=lambda: None)
+    window.key.setText('local-key')
+    window.change_overlays(True)
+    assert calls == ['install', ('publisher', 'http://127.0.0.1:8384', 'local-key'), 'start']
+    window.exiting = True
+    window.close()
+
+
+def test_selector_restores_saved_nas_connection(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+    app = QApplication.instance() or QApplication([])
+
+    class Settings:
+        def __init__(self):
+            self.values = {'endpoint': 'http://nas.invalid:8384'}
+        def value(self, key, default=None, type=None):
+            return self.values.get(key, default)
+        def setValue(self, key, value):
+            self.values[key] = value
+        def remove(self, key):
+            self.values.pop(key, None)
+
+    class Store:
+        def load(self, endpoint):
+            assert endpoint == 'http://nas.invalid:8384'
+            return 'saved-nas-key'
+
+    monkeypatch.setattr(ui, 'QSettings', lambda *args: Settings())
+    monkeypatch.setattr(ui, 'NasCredentialStore', Store)
+    window = Window()
+    assert 'NAS' in window.nas_endpoint.placeholderText()
+    assert window.nas_key.echoMode() == QLineEdit.EchoMode.Password
+    assert window.nas_endpoint.text() == 'http://nas.invalid:8384'
+    assert window.nas_key.text() == 'saved-nas-key'
+    window.exiting = True
+    window.close()
+
+
+def test_activity_reader_merges_nas_download_rows(monkeypatch):
+    import syncthing_bridge.activity as activity_module
+
+    class Engine:
+        def __init__(self, endpoint, key):
+            self.endpoint = endpoint
+            self.http = SimpleNamespace(timeout=None)
+        def activity(self, folder, **kwargs):
+            return {'current': [], 'queue': [], 'recent': [], 'notices': [], 'tracked': [],
+                    'uploads': [], 'page': 1, 'has_more': False}
+        def download_activity(self, folder, **kwargs):
+            assert self.endpoint == 'http://nas.invalid:8384'
+            return {'current': [{'name': 'nas-live.txt', 'status': 'NAS 正在下载'}],
+                    'queue': [{'name': 'nas-wait.txt', 'status': 'NAS 等待下载'}], 'has_more': True}
+        def close(self):
+            pass
+
+    monkeypatch.setattr(activity_module, 'Syncthing', Engine)
+    worker = ReadActivity('http://127.0.0.1:8384', 'local', 'drive', [],
+                          nas_endpoint='http://nas.invalid:8384', nas_key='nas-key')
+    received = []
+    worker.signals.ready.connect(lambda result, error: received.append((result, error)))
+    worker.run()
+    result, error = received[0]
+    assert error is None
+    assert result['current'][0]['name'] == 'nas-live.txt'
+    assert result['queue'][0]['name'] == 'nas-wait.txt'
+    assert result['has_more']
+
+
+def test_tray_single_click_opens_activity_double_click_opens_settings(monkeypatch):
+    from PySide6.QtWidgets import QSystemTrayIcon
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    calls = []
+    monkeypatch.setattr(window, 'show_activity', lambda: calls.append('activity'))
+    monkeypatch.setattr(window, 'show_window', lambda: calls.append('settings'))
+    window.tray_activated(QSystemTrayIcon.ActivationReason.Trigger)
+    window.tray_activated(QSystemTrayIcon.ActivationReason.DoubleClick)
+    assert calls == ['activity', 'settings']
+    window.exiting = True
+    window.close()
+
+
+def test_activity_panel_preserves_filenames_and_clears_stale_rows_on_error():
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    panel = window.activity_panel
+    panel.display({'current': [{'name': '工作/报告.txt', 'status': '正在下载'}],
+                   'recent': [], 'notices': []}, None)
+    assert '工作/报告.txt' in panel.lists['current'].topLevelItem(0).text(0)
+    panel.display(None, '读取失败')
+    assert panel.lists['current'].topLevelItemCount() == 0
+    assert panel.lists['notices'].topLevelItem(0).text(0) == '读取失败'
+    window.exiting = True
+    window.close()
+
+
+def test_activity_panel_separates_live_transfer_from_queue():
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    panel = window.activity_panel
+    panel.display({'current': [], 'queue': [{'name': '待上传.txt', 'status': '等待上传至对端'}],
+                   'recent': [], 'notices': []}, None)
+    assert panel.tabs.tabText(0) == '正在传输'
+    assert panel.tabs.tabText(1) == '等待队列'
+    assert '没有正在下载文件' in panel.lists['current'].topLevelItem(0).text(0)
+    assert '待上传.txt' in panel.lists['queue'].topLevelItem(0).text(0)
+    window.exiting = True
+    window.close()
+
+
+def test_second_page_error_restores_back_button_and_clears_loading():
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    panel = window.activity_panel
+    panel.page = 2
+    panel.previous_page.setEnabled(False)
+    panel.page_label.setText('第 2 页（读取中）')
+    panel.display(None, '读取失败')
+    assert panel.previous_page.isEnabled()
+    assert '读取中' not in panel.page_label.text()
+    assert '第 2 页' in panel.page_label.text()
+    window.exiting = True
+    window.close()
+
+
+def test_activity_response_for_previous_task_is_discarded():
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    window.activity_context = (object(), 'previous')
+    window.activity_ready({'current': [{'name': '旧任务.txt', 'status': '正在下载'}]}, None)
+    assert window.activity_panel.lists['current'].topLevelItemCount() == 0
+    window.exiting = True
+    window.close()
