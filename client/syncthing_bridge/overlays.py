@@ -8,7 +8,7 @@ import threading
 import time
 
 from syncthing_bridge.api import Syncthing
-from syncthing_bridge.selection import parse_document
+from syncthing_bridge.selection import literal, parse_document
 
 
 def selection_excludes(relative, rules, *, directory=False):
@@ -16,7 +16,7 @@ def selection_excludes(relative, rules, *, directory=False):
     if relative == '.':
         return False
     try:
-        _, entire, choices, _ = parse_document(rules)
+        _, entire, choices, escape = parse_document(rules)
     except ValueError:
         return False
     relative = relative.casefold()
@@ -25,7 +25,15 @@ def selection_excludes(relative, rules, *, directory=False):
                          for name, selected in choices.items()):
         return False
     ancestors = [name for name in choices if relative == name or relative.startswith(name + '/')]
-    selected = choices[max(ancestors, key=len)] if ancestors else entire
+    ancestor = max(ancestors, key=len) if ancestors else None
+    selected = choices[ancestor] if ancestor else entire
+    if not selected and not directory:
+        parent = relative.rpartition('/')[0]
+        helper = '!/' + (literal(parent, escape) + '/' if parent else '') + '*'
+        ordered = [line.casefold() for line in rules]
+        if helper in ordered:
+            if ancestor is None or ordered.index(helper) < ordered.index('/' + literal(ancestor, escape) + '/**'):
+                return False
     return not selected
 
 
@@ -77,6 +85,7 @@ class OverlayPublisher:
         self.cache = Path(cache or Path(os.environ['LOCALAPPDATA']) / 'UGSync/overlays')
         self.stop_event = threading.Event()
         self.records = {}
+        self.roots = None
         self.lock = threading.Lock()
         self.thread = threading.Thread(target=self.run, name='Explorer-status', daemon=True)
 
@@ -109,7 +118,23 @@ class OverlayPublisher:
 
     def notify(self, path):
         # Queue a lightweight shell refresh; do not restart Explorer.
-        ctypes.windll.shell32.SHChangeNotify(0x2000, 0x0005, ctypes.c_wchar_p(path), None)
+        ctypes.windll.shell32.SHChangeNotify(0x2000, 0x2005, ctypes.c_wchar_p(path), None)
+
+    def notify_directory(self, path):
+        ctypes.windll.shell32.SHChangeNotify(0x1000, 0x2005, ctypes.c_wchar_p(path), None)
+
+    def publish_roots(self, roots):
+        if len('\n'.join(roots)) > 30000:
+            roots = []
+        if roots == self.roots:
+            return
+        previous = self.roots or []
+        temporary = self.cache / 'roots.tmp'
+        temporary.write_bytes('\n'.join(roots).encode('utf-16-le'))
+        os.replace(temporary, self.cache / 'roots.txt')
+        self.roots = list(roots)
+        for root in dict.fromkeys(previous + roots):
+            self.notify_directory(root)
 
     def invalidate(self, path=None):
         with self.lock:
@@ -135,12 +160,7 @@ class OverlayPublisher:
                         except Exception:
                             folder['_overlay_selection'] = None
                     roots = [os.path.abspath(os.path.expandvars(os.path.expanduser(f['path']))) for f in folders[:16]]
-                    roots_text = '\n'.join(roots)
-                    if len(roots_text) > 30000:
-                        roots_text = ''
-                    temporary = self.cache / 'roots.tmp'
-                    temporary.write_bytes(roots_text.encode('utf-16-le'))
-                    os.replace(temporary, self.cache / 'roots.txt')
+                    self.publish_roots(roots)
                     identity = api.request('GET', '/rest/system/status')['myID']
                     connections = api.request('GET', '/rest/system/connections').get('connections', {})
                     paths = []
@@ -153,18 +173,25 @@ class OverlayPublisher:
                                 paths.append(path)
                         finally:
                             request.unlink(missing_ok=True)
+                    requested = set(paths)
                     with self.lock:
                         known = list(self.records)
                     if known:
                         paths += (known + known)[index:index + 16]
                         index = (index + 16) % len(known)
+                    changed_directories = set()
                     for path in dict.fromkeys(paths):
                         if self.stop_event.is_set():
                             break
                         try:
-                            self.inspect(api, folders, connections, identity, path)
+                            changed = self.inspect(api, folders, connections, identity, path,
+                                                   requested=path in requested)
+                            if changed:
+                                changed_directories.add(os.path.dirname(path))
                         except Exception:
                             self.invalidate(path)
+                    for directory in changed_directories:
+                        self.notify_directory(directory)
                 except Exception:
                     # Cached green expires. An unreachable engine is not proof of pause.
                     self.invalidate()
@@ -172,7 +199,7 @@ class OverlayPublisher:
         finally:
             api.close()
 
-    def inspect(self, api, folders, connections, identity, path):
+    def inspect(self, api, folders, connections, identity, path, *, requested=False):
         path = os.path.abspath(path)
         matches = []
         for folder in folders:
@@ -237,7 +264,8 @@ class OverlayPublisher:
                     self.records[path] = (state, stamp, before.st_size)
                 else:
                     self.records.pop(path, None)
-            if old != self.records.get(path):
+            if old != self.records.get(path) or (requested and state):
                 self.notify(path)
+                return True
         except OSError:
             self.invalidate(path)

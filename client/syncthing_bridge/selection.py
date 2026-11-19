@@ -37,13 +37,24 @@ def compile_selection(included=(), excluded=(), *, entire_root=False, escape='\\
     if includes & excludes:
         raise ValueError('目录不能同时包含和排除')
     rules = ['#escape=' + escape, '// Managed by UGSync Syncthing bridge']
+    parents = set()
+    if _direct_files is True:
+        parents.update(_direct_file_parents(includes, False))
+        if entire_root:
+            parents = {p for p in parents if any(p == e or p.startswith(e + '/') for e in excludes)}
     # More-specific choices must precede inherited parent choices. Both the
     # directory and its descendants are explicit to avoid accidental globbing.
-    for name in sorted(includes | excludes, key=lambda p: (-p.count('/'), p)):
-        prefix = '!' if name in includes else ''
+    for name in sorted(includes | excludes | parents, key=lambda p: (not p, -p.count('/'), p)):
         escaped = literal(name, escape)
-        rules.extend([prefix + '/' + escaped, prefix + '/' + escaped + '/**'])
-    if _direct_files:
+        if name in parents:
+            direct = '/' + (escaped + '/' if name else '') + '*'
+            # Syncthing also matches the descendants of matching directories.
+            # Deeper explicit choices already have precedence over this guard.
+            rules.extend([direct + '/**', '!' + direct])
+        if name in includes or name in excludes:
+            prefix = '!' if name in includes else ''
+            rules.extend([prefix + '/' + escaped, prefix + '/' + escaped + '/**'])
+    if _direct_files == 'legacy':
         for parent in _direct_file_parents(includes, entire_root):
             rules.append('!/' + (literal(parent, escape) + '/' if parent else '') + '*')
     if not entire_root:
@@ -60,26 +71,14 @@ def parse_selection(rules, escape='\\'):
     entire = rules[-1] != '*'
     body = rules[2:] if entire else rules[2:-1]
     choices = {}
-    helpers = set()
     index = 0
     while index < len(body):
         first = body[index]
+        if (first.startswith('/') and first.endswith('/*/**') and index + 1 < len(body)
+                and body[index + 1] == '!' + first[:-3]):
+            index += 2
+            continue
         if first.startswith('!/') and first.endswith('/*'):
-            escaped = first[2:-2]
-            name, character_index = '', 0
-            while character_index < len(escaped):
-                if escaped[character_index] == escape:
-                    character_index += 1
-                    if character_index == len(escaped):
-                        return None
-                name += escaped[character_index]
-                character_index += 1
-            try:
-                if name:
-                    normalize(name)
-                helpers.add(name)
-            except ValueError:
-                return None
             index += 1
             continue
         if index + 1 == len(body):
@@ -106,7 +105,8 @@ def parse_selection(rules, escape='\\'):
     excludes = [p for p, selected in choices.items() if not selected]
     canonical = compile_selection(includes, excludes, entire_root=entire, escape=escape)
     legacy = compile_selection(includes, excludes, entire_root=entire, escape=escape, _direct_files=False)
-    return (entire, choices) if rules in (canonical, legacy) else None
+    older_helpers = compile_selection(includes, excludes, entire_root=entire, escape=escape, _direct_files='legacy')
+    return (entire, choices) if rules in (canonical, legacy, older_helpers) else None
 
 
 DOCUMENT_MARKER = '// UGSync selection begins (v2)'

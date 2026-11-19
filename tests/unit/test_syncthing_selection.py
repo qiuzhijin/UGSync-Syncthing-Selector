@@ -54,8 +54,24 @@ def test_selected_descendant_also_includes_direct_files_of_each_parent():
     rules = compile_selection(['Work/Keep'], entire_root=False)
     assert '!/*' in rules
     assert '!/Work/*' in rules
+    assert rules.index('!/Work/Keep/**') < rules.index('/Work/*/**') < rules.index('!/Work/*')
+    assert rules.index('!/Work/*') < rules.index('/*/**') < rules.index('!/*')
     assert '!/Work/Keep/**' in rules
     assert parse_selection(rules) == (False, {'Work/Keep': True})
+
+
+@pytest.mark.parametrize('entire', [False, True])
+def test_reincluded_child_keeps_excluded_parents_direct_files(entire):
+    rules = compile_selection(['Work/Keep'], ['Work'], entire_root=entire)
+    assert rules.index('!/Work/Keep/**') < rules.index('!/Work/*') < rules.index('/Work/**')
+    assert parse_selection(rules) == (entire, {'Work/Keep': True, 'Work': False})
+
+
+def test_v27_rules_with_helpers_after_exclusions_still_load():
+    rules = ['#escape=\\', '// Managed by UGSync Syncthing bridge',
+             '!/Work/Keep', '!/Work/Keep/**', '/Work', '/Work/**',
+             '!/*', '!/Work/*', '*']
+    assert parse_selection(rules) == (False, {'Work/Keep': True, 'Work': False})
 
 
 @pytest.mark.parametrize('path', ['../x', '/x', 'a//b', 'a\\b', 'a\nb', ' a', 'a/..'])

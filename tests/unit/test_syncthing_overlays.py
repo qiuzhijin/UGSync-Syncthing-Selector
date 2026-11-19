@@ -9,6 +9,9 @@ def test_deselected_local_paths_are_stopped_even_when_peer_offline():
     assert selection_excludes('Photos', rules, directory=True)
     assert selection_excludes('Photos/old.jpg', rules)
     assert not selection_excludes('Work', rules, directory=True)
+    assert not selection_excludes('Work/direct.txt', rules)
+    assert not selection_excludes('direct.txt', rules)
+    assert selection_excludes('Work/Other/direct.txt', rules)
     assert not selection_excludes('Work/Keep/file.txt', rules)
     assert not selection_excludes('.', rules, directory=True)
     resumed = compile_document([], entire_root=True)
@@ -17,7 +20,8 @@ def test_deselected_local_paths_are_stopped_even_when_peer_offline():
 
 def test_nested_selection_and_foreign_rules_are_not_guessed():
     rules = compile_document([], ['Work', 'Work/Private/Keep'], ['Work/Private'], entire_root=False)
-    assert selection_excludes('Work/Private/file.txt', rules)
+    assert not selection_excludes('Work/Private/file.txt', rules)
+    assert selection_excludes('Work/Private/Other/file.txt', rules)
     assert not selection_excludes('Work/Private', rules, directory=True)
     assert not selection_excludes('Work/Private/Keep/file.txt', rules)
     assert not selection_excludes('Other', ['#include external.txt'])
@@ -99,3 +103,20 @@ def test_changed_unscanned_file_never_green():
 
 def test_unknown_or_offline_has_no_green():
     assert file_state({'local': None}, [], 0, 0) is None
+
+
+def test_root_listing_notifies_explorer_after_becoming_available(tmp_path):
+    from syncthing_bridge.overlays import OverlayPublisher
+
+    publisher = OverlayPublisher('http://127.0.0.1:8384', 'test', cache=tmp_path)
+    root = str(tmp_path / 'Drive')
+    notifications = []
+
+    def notify(path):
+        assert (tmp_path / 'roots.txt').read_bytes().decode('utf-16-le') == root
+        notifications.append(path)
+
+    publisher.notify_directory = notify
+    publisher.publish_roots([root])
+    publisher.publish_roots([root])
+    assert notifications == [root]
