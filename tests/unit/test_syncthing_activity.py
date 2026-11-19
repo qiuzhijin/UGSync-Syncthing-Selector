@@ -4,19 +4,23 @@ import pytest
 from syncthing_bridge.api import Syncthing
 
 
-def test_progress_snapshot_checks_folder_error_details_when_status_has_a_count():
+@pytest.mark.parametrize('errors', [None, [{'path': 'example.txt', 'error': 'access denied'}]])
+def test_progress_snapshot_checks_only_first_folder_error_when_status_has_a_count(errors):
     def respond(request):
+        if request.url.path == '/rest/folder/errors':
+            if request.url.params.get('page') != '1' or request.url.params.get('perpage') != '1':
+                return httpx.Response(200, content=b' ' * ((4 << 20) + 1))
+            return httpx.Response(200, json={'errors': errors, 'page': 1, 'perpage': 1})
         values = {
             '/rest/config/folders': [{'id': 'drive', 'devices': [{'deviceID': 'pc'}]}],
             '/rest/db/status': {'state': 'idle', 'errors': 1, 'pullErrors': 1},
-            '/rest/folder/errors': {'errors': None},
             '/rest/system/status': {'myID': 'pc'},
             '/rest/system/connections': {'connections': {}},
         }
         return httpx.Response(200, json=values[request.url.path])
     api = Syncthing('http://127.0.0.1:8384', 'synthetic', transport=httpx.MockTransport(respond))
     snapshot = api.progress_snapshot('drive')
-    assert snapshot['local']['folderErrors'] == []
+    assert snapshot['local']['folderErrors'] == (errors or [])
     api.close()
 
 

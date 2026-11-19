@@ -116,7 +116,9 @@ class Syncthing:
             peers.append(peer)
         local = self.status(folder)
         if local.get('errors') or local.get('pullErrors'):
-            detail = self.request('GET', '/rest/folder/errors', params={'folder': folder})
+            # Progress only needs to know whether an actual error exists.
+            detail = self.request('GET', '/rest/folder/errors', params={
+                'folder': folder, 'page': 1, 'perpage': 1})
             local['folderErrors'] = detail.get('errors') or [] if isinstance(detail, dict) else []
         return {'paused': False, 'local': local, 'peers': peers,
                 'traffic': connections.get('total', {})}
