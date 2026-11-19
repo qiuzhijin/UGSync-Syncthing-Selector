@@ -140,7 +140,8 @@ class ActivityPanel(QFrame):
         self.previous_page.setEnabled(self.page > 1)
         self.next_page.setEnabled(result.get('has_more', False))
         page_items = len(result.get('current', [])) + len(result.get('queue', []))
-        self.page_label.setText('传输 / 队列：第 %s 页 · 本页 %s 项' % (self.page, page_items))
+        suffix = '（部分对端队列未读取）' if result.get('queue_incomplete') else ''
+        self.page_label.setText('传输 / 队列：第 %s 页 · 本页 %s 项%s' % (self.page, page_items, suffix))
         for key, rows in result.items():
             if key not in self.lists:
                 continue
@@ -156,7 +157,8 @@ class ActivityPanel(QFrame):
             if not rows:
                 QTreeWidgetItem(self.lists[key], {
                     'current': ['没有正在下载文件；本机上传状态见顶部摘要。'],
-                    'queue': ['本页没有等待下载或等待上传项目。'],
+                    'queue': ['部分对端队列暂不可用，详情见通知。' if suffix else
+                              '本页没有等待下载或等待上传项目。'],
                     'recent': ['暂无完成记录'],
                     'notices': ['暂无文件错误通知']}[key])
         self.note.setText('“正在传输”仅列出 Syncthing 确认的本机下载文件；本机上传速度和对端剩余量显示在顶部。等待队列不是正在传输列表。最近完成为有限记录。悬停文件查看完整路径。')

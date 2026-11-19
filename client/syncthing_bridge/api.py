@@ -60,7 +60,9 @@ class Syncthing:
                     return None
                 import json
                 return json.loads(data)
-        except (httpx.HTTPError, ValueError) as error:
+        except httpx.TimeoutException:
+            raise SyncthingError('读取同步引擎超时') from None
+        except (httpx.HTTPError, ValueError):
             raise SyncthingError('无法读取同步引擎响应，请检查地址与密钥') from None
 
     def folders(self):
@@ -175,9 +177,17 @@ class Syncthing:
         if len(peers) > 4:
             result['notices'].append({'name': '设备数量限制', 'status': '仅查询前 4 台已连接设备，清单不代表全部设备'})
         pending = {}
+        queried = set()
         for device in peers[:4]:
-            need = self.request('GET', '/rest/db/remoteneed', params={
-                'folder': folder, 'device': device, 'page': page, 'perpage': 30})
+            try:
+                need = self.request('GET', '/rest/db/remoteneed', params={
+                    'folder': folder, 'device': device, 'page': page, 'perpage': 30})
+            except SyncthingError as error:
+                result['queue_incomplete'] = True
+                result['notices'].append({'name': device[:7],
+                    'status': f'对端待接收队列暂不可用：{error}'})
+                continue
+            queried.add(device)
             result['has_more'] |= len(need.get('files', [])) >= 30
             for item in need.get('files', []):
                 result['queue'].append({'name': item['name'], 'status': '等待上传至对端',
@@ -191,7 +201,7 @@ class Syncthing:
             key = (row['device'], row['name'])
             if key in pending:
                 continue
-            if row['device'] not in peers[:4] or checked >= 5:
+            if row['device'] not in queried or checked >= 5:
                 retained.append(row)
                 continue
             checked += 1

@@ -59,6 +59,50 @@ def test_remote_download_activity_separates_nas_progress_from_queue():
     api.close()
 
 
+def test_timed_out_peer_does_not_hide_local_activity_or_other_peer_queue():
+    failed = True
+
+    def respond(request):
+        if request.url.path == '/rest/db/remoteneed':
+            peer = request.url.params['device']
+            if peer == 'slow-peer' and failed:
+                raise httpx.ReadTimeout('Synthetic timeout', request=request)
+            return httpx.Response(200, json={'files': [{'name': f'{peer}.txt'}]})
+        values = {
+            '/rest/config/folders': [{'id': 'drive', 'devices': [
+                {'deviceID': 'slow-peer'}, {'deviceID': 'good-peer'}]}],
+            '/rest/events': [{'data': {'folder': 'drive', 'item': 'finished.txt', 'type': 'file'}}],
+            '/rest/db/need': {'progress': [{'name': 'downloading.txt'}],
+                              'queued': [{'name': 'queued.txt'}]},
+            '/rest/system/status': {'myID': 'pc'},
+            '/rest/system/connections': {'connections': {
+                'slow-peer': {'connected': True}, 'good-peer': {'connected': True}}},
+            '/rest/db/file': {'global': {'version': ['pc:1']}, 'local': {'version': ['pc:1']},
+                              'availability': [{'id': 'slow-peer', 'fromTemporary': False}]},
+        }
+        return httpx.Response(200, json=values[request.url.path])
+
+    tracked = {'name': 'prior.txt', 'device': 'slow-peer', 'version': ['pc:1']}
+    api = Syncthing('http://127.0.0.1:8384', 'synthetic', transport=httpx.MockTransport(respond))
+    try:
+        result = api.activity('drive', tracked=[tracked])
+        assert [row['name'] for row in result['current']] == ['downloading.txt']
+        assert [row['name'] for row in result['queue']] == ['queued.txt', 'good-peer.txt']
+        assert [row['name'] for row in result['recent']] == ['finished.txt']
+        assert result['queue_incomplete']
+        assert '超时' in result['notices'][0]['status']
+        assert not result['uploads']
+        assert tracked in result['tracked']
+
+        failed = False
+        result = api.activity('drive', tracked=result['tracked'])
+        assert not result.get('queue_incomplete')
+        assert [row['name'] for row in result['queue']] == ['queued.txt', 'slow-peer.txt', 'good-peer.txt']
+        assert [row['name'] for row in result['uploads']] == ['prior.txt']
+    finally:
+        api.close()
+
+
 @pytest.mark.parametrize('file_response', [
     {'global': {'version': ['pc:1']}, 'local': {'version': ['pc:1']}, 'availability': None},
     {'global': None, 'local': None, 'availability': None},
