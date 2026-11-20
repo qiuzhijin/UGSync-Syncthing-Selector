@@ -8,6 +8,13 @@ from syncthing_bridge.__main__ import Window
 from syncthing_bridge.activity import ReadActivity
 
 
+@pytest.fixture(autouse=True)
+def isolate_saved_nas_credentials(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+
+    monkeypatch.setattr(ui, 'NasCredentialStore', lambda: SimpleNamespace(load=lambda endpoint: None))
+
+
 def test_lazy_children_inherit_selection_and_can_be_excluded():
     app = QApplication.instance() or QApplication([])
     class Engine:
@@ -108,6 +115,50 @@ def test_saving_child_selection_includes_local_and_global_direct_files(monkeypat
         window.preview()
         assert [line for line in saved if line.startswith('!')] == [
             '!/Work/local.txt', '!/Work/remote.txt', '!/Work/Keep', '!/Work/Keep/**']
+    finally:
+        window.exiting = True
+        window.close()
+
+
+@pytest.mark.parametrize('identity,expected', [('nas', ['AI', '申请专利']), ('other', ['申请专利'])])
+def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, identity, expected):
+    import syncthing_bridge.__main__ as ui
+
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    directory = 'FILE_INFO_TYPE_DIRECTORY'
+
+    class Local:
+        def folders(self):
+            return [{'id': 'test', 'devices': [{'deviceID': 'nas'}]}]
+
+        def browse(self, folder, prefix, *, directories_only=True):
+            return [{'name': '申请专利', 'type': directory}]
+
+        def close(self):
+            pass
+
+    class Nas:
+        def __init__(self, endpoint, key):
+            self.http = SimpleNamespace(timeout=None)
+
+        def request(self, method, route):
+            return {'myID': identity}
+
+        def browse(self, folder, prefix, *, directories_only=True):
+            assert prefix == '学习'
+            return [{'name': 'AI', 'type': directory}, {'name': '申请专利', 'type': directory}]
+
+        def close(self):
+            pass
+
+    window.api = Local()
+    window.nas_endpoint.setText('http://nas.invalid:8384')
+    window.nas_key.setText('test-key')
+    monkeypatch.setattr(ui, 'Syncthing', Nas)
+    try:
+        rows = window.selection_rows('test', '学习')
+        assert [row['name'] for row in rows] == expected
     finally:
         window.exiting = True
         window.close()

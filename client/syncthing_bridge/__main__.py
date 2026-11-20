@@ -1,6 +1,7 @@
 """Run with: python -m syncthing_bridge."""
 import os
 import sys
+from contextlib import closing
 from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QThreadPool, Slot, QSettings, QUrl
@@ -9,7 +10,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSys
     QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar,
     QMessageBox, QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from syncthing_bridge.api import Syncthing, SyncthingTimeout, local_credentials
+from syncthing_bridge.api import Syncthing, SyncthingError, SyncthingTimeout, local_credentials
 from syncthing_bridge.selection import normalize, parse_document, compile_document, direct_file_parents
 from syncthing_bridge.desktop import startup_enabled, set_startup, engine_available, launch_engine
 from syncthing_bridge.diagnostics import application_log, report_exception
@@ -436,8 +437,39 @@ class Window(QMainWindow):
         self.status.setText('已恢复目录选择，现有排除规则会保留。保存后可点击“继续同步”。')
         self.refresh_status()
 
+    def selection_rows(self, folder, prefix, *, directories_only=True):
+        local_error = None
+        try:
+            local_rows = self.api.browse(folder, prefix) if directories_only else self.api.browse(
+                folder, prefix, directories_only=False)
+        except SyncthingError as error:
+            local_error = error
+            local_rows = []
+
+        nas_rows = []
+        endpoint, key = self.nas_endpoint.text().strip(), self.nas_key.text().strip()
+        if endpoint and key:
+            try:
+                task = next((row for row in self.api.folders() if row['id'] == folder), None)
+                peers = {device['deviceID'] for device in (task or {}).get('devices', [])}
+                if peers:
+                    with closing(Syncthing(endpoint, key)) as nas:
+                        nas.http.timeout = 2.0
+                        identity = nas.request('GET', '/rest/system/status').get('myID')
+                        if identity in peers:
+                            nas_rows = nas.browse(folder, prefix, directories_only=directories_only)
+                            local_error = None
+            except (SyncthingError, ValueError) as error:
+                report_exception('browse_nas_selection', error)
+        if local_error is not None:
+            raise local_error
+
+        rows = {(row['name'].casefold(), row.get('type')): row for row in nas_rows}
+        rows.update({(row['name'].casefold(), row.get('type')): row for row in local_rows})
+        return [rows[key] for key in sorted(rows, key=lambda item: item[0])]
+
     def populate(self, parent, prefix, checked):
-        rows = self.api.browse(self.folders.currentData(), prefix)
+        rows = self.selection_rows(self.folders.currentData(), prefix)
         self.updating = True
         try:
             for row in rows:
@@ -544,7 +576,7 @@ class Window(QMainWindow):
             root = Path(os.path.expandvars(config['path'])).expanduser()
             for parent in parents:
                 local = root / parent
-                rows = self.api.browse(folder, parent, directories_only=False)
+                rows = self.selection_rows(folder, parent, directories_only=False)
                 directory_names = {row['name'].casefold() for row in rows
                                    if row.get('type') == 'FILE_INFO_TYPE_DIRECTORY'}
                 names = {row['name'] for row in rows if row.get('type') == 'FILE_INFO_TYPE_FILE'}
