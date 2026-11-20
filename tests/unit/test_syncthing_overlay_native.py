@@ -1,14 +1,37 @@
+import base64
 import ctypes
 from contextlib import nullcontext
 import os
 from pathlib import Path
 import sys
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from syncthing_bridge.overlays import OverlayPublisher, cache_key
+from syncthing_bridge import overlay_install
 from syncthing_bridge.overlay_install import overlay_extension_installed
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows elevation command')
+def test_overlay_install_quotes_script_path_with_spaces(monkeypatch, tmp_path):
+    payload = tmp_path / "Program Files" / "User's UGSync"
+    payload.mkdir(parents=True)
+    for name in overlay_install._PAYLOAD_FILES:
+        (payload / name).touch()
+    installed = iter((False, True))
+    monkeypatch.setattr(overlay_install, '_payload_directory', lambda: payload)
+    monkeypatch.setattr(overlay_install, 'overlay_extension_installed', lambda: next(installed))
+
+    def launch(args, **kwargs):
+        command = base64.b64decode(args[-1]).decode('utf-16-le')
+        script = str(payload / 'install_overlays.ps1').replace("'", "''")
+        assert f'-File "{script}" -Action Install' in command
+        return SimpleNamespace(returncode=0)
+
+    monkeypatch.setattr(overlay_install.subprocess, 'run', launch)
+    assert overlay_install.install_overlay_extension()
 
 
 @pytest.mark.skipif(sys.platform != 'win32', reason='Windows registry')

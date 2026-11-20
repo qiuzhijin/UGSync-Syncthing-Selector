@@ -1,3 +1,5 @@
+import pytest
+
 from syncthing_bridge.overlays import file_state
 from syncthing_bridge.overlays import selection_excludes
 from syncthing_bridge.overlays import selection_partial
@@ -59,7 +61,18 @@ def test_existing_deselected_file_and_directory_publish_red_without_peer(tmp_pat
     assert file.read_text() == 'retained locally'
 
 
-def test_parent_with_selected_descendant_publishes_blue_not_red(tmp_path):
+@pytest.mark.parametrize('downloads,uploads,reported,expected', [
+    ([], [], 0, 'G'),
+    (['Elsewhere/file.txt'], ['Work/Skipped/file.txt', 'Workshop/file.txt'], 1, 'G'),
+    (['Work/Keep/file.txt'], [], 1, 'B'),
+    (['Work/direct.txt'], [], 1, 'B'),
+    ([], ['Work/direct.txt'], 0, 'B'),
+    ([], ['Work/Keep/file.txt'], 0, 'B'),
+    ([], [], 1, 'B'),
+    ([], [], 1024, 'B'),
+    ([f'Elsewhere/{index}.txt' for index in range(256)] + ['Work/Keep/later.txt'], [], 257, 'B'),
+])
+def test_partial_parent_state_uses_only_selected_content(tmp_path, downloads, uploads, reported, expected):
     import sys
     import pytest
     if sys.platform != 'win32':
@@ -67,9 +80,20 @@ def test_parent_with_selected_descendant_publishes_blue_not_red(tmp_path):
     from syncthing_bridge.overlays import OverlayPublisher
 
     class Api:
+        def status(self, folder):
+            return {'state': 'syncing' if reported else 'idle', 'needTotalItems': reported}
+
         def request(self, method, route, **kwargs):
-            assert (method, route) == ('GET', '/rest/db/file')
-            return {'local': {'ignored': True}}
+            if route == '/rest/db/need':
+                params = kwargs['params']
+                size = params['perpage']
+                start = (params['page'] - 1) * size
+                return {'queued': [{'name': name} for name in downloads[start:start + size]],
+                        'progress': [], 'rest': []}
+            if route == '/rest/db/remoteneed':
+                return {'files': [{'name': name.replace('/', '\\')} for name in uploads]}
+            assert route == '/rest/db/completion'
+            return {'remoteState': 'valid', 'needItems': len(uploads), 'needDeletes': 0}
 
     root = tmp_path / 'Drive'
     parent = root / 'Work'
@@ -77,9 +101,9 @@ def test_parent_with_selected_descendant_publishes_blue_not_red(tmp_path):
     publisher = OverlayPublisher('http://127.0.0.1:8384', 'test', cache=tmp_path / 'cache')
     (publisher.cache / 'cache').mkdir(parents=True)
     folder = {'id': 'drive', 'path': str(root), 'devices': [{'deviceID': 'nas'}],
-              '_overlay_selection': compile_document([], ['Work/Keep'], entire_root=False)}
+              '_overlay_selection': compile_document([], ['Work/Keep'], direct_files=['Work/direct.txt'])}
     publisher.inspect(Api(), [folder], {'nas': {'connected': True}}, 'pc', str(parent))
-    assert publisher.records[str(parent)][0] == 'B'
+    assert publisher.records[str(parent)][0] == expected
 
 
 def test_green_requires_matching_version_and_full_remote_copy():

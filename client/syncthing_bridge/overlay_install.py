@@ -1,6 +1,5 @@
 """Install and detect the bundled Explorer overlay extension."""
 import base64
-import os
 from pathlib import Path
 import subprocess
 import sys
@@ -55,10 +54,11 @@ def install_overlay_extension():
     if missing:
         raise OverlayInstallError('角标安装组件不完整，请重新解压完整客户端包。')
     script = payload / 'install_overlays.ps1'
-    escaped = str(script).replace("'", "''")
+    arguments = subprocess.list2cmdline(['-NoProfile', '-ExecutionPolicy', 'Bypass',
+                                         '-File', str(script), '-Action', 'Install'])
+    escaped = arguments.replace("'", "''")
     command = ("$process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru "
-               "-ArgumentList @('-NoProfile','-ExecutionPolicy','Bypass','-File','%s','-Action','Install'); "
-               "exit $process.ExitCode") % escaped
+               f"-ArgumentList '{escaped}' -ErrorAction Stop; exit $process.ExitCode")
     encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
     try:
         result = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',

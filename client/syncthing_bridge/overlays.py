@@ -7,7 +7,7 @@ from pathlib import Path
 import threading
 import time
 
-from syncthing_bridge.api import Syncthing
+from syncthing_bridge.api import Syncthing, SyncthingError
 from syncthing_bridge.selection import DIRECT_FILES_MARKER, literal, parse_document
 
 
@@ -53,6 +53,50 @@ def selection_partial(relative, rules):
     selected = choices[max(ancestors, key=len)] if ancestors else entire
     prefix = relative + '/' if relative else ''
     return any(name.startswith(prefix) and choice != selected for name, choice in choices.items())
+
+
+def _pending_entries(api, route, params, sections, count):
+    if type(count) is not int or count < 0 or count >= 1024:
+        return None
+    if count == 0:
+        return []
+    entries = {}
+    for page in range(1, 5):
+        response = api.request('GET', route, params={**params, 'page': page, 'perpage': 256})
+        rows = [item for section in sections for item in (response[section] or [])]
+        for row in rows:
+            path = row['name'].replace('\\', '/').casefold()
+            if not path or path in entries:
+                return None
+            entries[path] = row.get('type') == 'FILE_INFO_TYPE_DIRECTORY'
+        if len(rows) < 256:
+            return list(entries.items()) if len(entries) >= count else None
+    return None
+
+
+def _pending_for_partial_folders(api, folder, peers):
+    status = api.status(folder)
+    if status.get('state') not in ('idle', 'syncing') or status.get('errors') or status.get('pullErrors'):
+        return None
+    params = {'folder': folder}
+    downloads = _pending_entries(api, '/rest/db/need', params,
+                                 ('progress', 'queued', 'rest'), status.get('needTotalItems'))
+    if downloads is None:
+        return None
+    uploads = []
+    for peer in peers:
+        remote = {**params, 'device': peer}
+        completion = api.request('GET', '/rest/db/completion', params=remote)
+        if completion.get('remoteState') != 'valid':
+            return None
+        counts = (completion.get('needItems'), completion.get('needDeletes'))
+        if any(type(count) is not int or count < 0 for count in counts):
+            return None
+        entries = _pending_entries(api, '/rest/db/remoteneed', remote, ('files',), sum(counts))
+        if entries is None:
+            return None
+        uploads.extend(entries)
+    return downloads, uploads
 
 
 def file_state(info, peers, size, modified):
@@ -200,12 +244,13 @@ class OverlayPublisher:
                         paths += (known + known)[index:index + 16]
                         index = (index + 16) % len(known)
                     changed_directories = set()
+                    partial_pending = {}
                     for path in dict.fromkeys(paths):
                         if self.stop_event.is_set():
                             break
                         try:
                             changed = self.inspect(api, folders, connections, identity, path,
-                                                   requested=path in requested)
+                                                   requested=path in requested, partial_pending=partial_pending)
                             if changed:
                                 changed_directories.add(os.path.dirname(path))
                         except Exception:
@@ -220,7 +265,7 @@ class OverlayPublisher:
         finally:
             api.close()
 
-    def inspect(self, api, folders, connections, identity, path, *, requested=False):
+    def inspect(self, api, folders, connections, identity, path, *, requested=False, partial_pending=None):
         path = os.path.abspath(path)
         matches = []
         for folder in folders:
@@ -250,8 +295,24 @@ class OverlayPublisher:
                     return
                 state = 'R'
             elif rules is not None and os.path.isdir(path) and selection_partial(relative, rules):
-                # A selected descendant also keeps this directory's direct files in scope.
                 state = 'B'
+                if peers and all(connections.get(p, {}).get('connected') for p in peers):
+                    if partial_pending is None:
+                        partial_pending = {}
+                    if folder['id'] not in partial_pending:
+                        partial_pending[folder['id']] = None
+                        try:
+                            partial_pending[folder['id']] = _pending_for_partial_folders(api, folder['id'], peers)
+                        except SyncthingError:
+                            pass
+                    pending = partial_pending[folder['id']]
+                    if pending is not None:
+                        downloads, uploads = pending
+                        prefix = '' if relative == '.' else relative.casefold() + '/'
+                        if not (any(name.startswith(prefix) for name, _ in downloads) or
+                                any(name.startswith(prefix) and not selection_excludes(name, rules, directory=directory)
+                                    for name, directory in uploads)):
+                            state = 'G'
             elif not peers or any(not connections.get(p, {}).get('connected') for p in peers):
                 state = None
             elif os.path.isdir(path):
