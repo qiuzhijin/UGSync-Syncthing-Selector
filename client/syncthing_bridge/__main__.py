@@ -8,7 +8,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSys
     QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar,
     QMessageBox, QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
-from syncthing_bridge.api import Syncthing, local_credentials
+from syncthing_bridge.api import Syncthing, SyncthingTimeout, local_credentials
 from syncthing_bridge.selection import normalize, parse_document, compile_document, direct_file_parents
 from syncthing_bridge.desktop import startup_enabled, set_startup, engine_available, launch_engine
 from syncthing_bridge.instance import SingleInstance
@@ -31,6 +31,7 @@ class Window(QMainWindow):
         self.updating = False
         self.exiting = False
         self.starting = False
+        self.startup_connection = False
         self.launch_checks = 0
         self.progress_display = ProgressDisplay()
         self.activity_worker = None
@@ -303,6 +304,8 @@ class Window(QMainWindow):
         self.finish_local_connection()
 
     def wait_for_engine(self):
+        if self.exiting:
+            return
         self.launch_checks += 1
         try:
             endpoint, _ = local_credentials()
@@ -311,12 +314,34 @@ class Window(QMainWindow):
             ready = False
         if ready:
             self.starting = False
-            self.run(self.finish_local_connection)
+            if self.startup_connection:
+                self.try_startup_connection(self.finish_local_connection)
+            else:
+                self.run(self.finish_local_connection)
         elif self.launch_checks < 30 and self.engine_process.poll() is None:
             QTimer.singleShot(500, self.wait_for_engine)
         else:
             self.starting = False
+            self.startup_connection = False
             self.status.setText('同步引擎未能启动，请检查配置或端口占用。')
+
+    def start_local_on_login(self):
+        self.startup_connection = True
+        self.try_startup_connection(self.connect_local)
+
+    def try_startup_connection(self, action, retries=2):
+        if self.exiting or not self.startup_connection:
+            return
+        try:
+            action()
+        except Exception as error:
+            if isinstance(error, SyncthingTimeout) and retries:
+                self.status.setText('同步引擎响应超时，稍后自动重试…')
+                QTimer.singleShot(5000, lambda: self.try_startup_connection(action, retries - 1))
+                return
+            self.status.setText(f'{error}。可点击“连接本机”重试。')
+        if not self.starting:
+            self.startup_connection = False
 
     def finish_local_connection(self):
         endpoint, key = local_credentials()
@@ -583,9 +608,12 @@ def main():
     if '--startup-check' in sys.argv:
         QTimer.singleShot(200, app.quit)
     else:
-        if '--autostart' in sys.argv and window.tray.isVisible():
-            window.hide()
-        QTimer.singleShot(0, lambda: window.run(window.connect_local))
+        if '--autostart' in sys.argv:
+            if window.tray.isVisible():
+                window.hide()
+            QTimer.singleShot(0, window.start_local_on_login)
+        else:
+            QTimer.singleShot(0, lambda: window.run(window.connect_local))
     return app.exec()
 
 

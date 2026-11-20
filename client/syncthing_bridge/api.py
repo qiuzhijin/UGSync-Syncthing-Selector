@@ -30,6 +30,10 @@ class SyncthingError(RuntimeError):
     pass
 
 
+class SyncthingTimeout(SyncthingError):
+    pass
+
+
 class Syncthing:
     def __init__(self, endpoint, key, *, transport=None):
         parsed = urlsplit(endpoint)
@@ -61,7 +65,7 @@ class Syncthing:
                 import json
                 return json.loads(data)
         except httpx.TimeoutException:
-            raise SyncthingError('读取同步引擎超时') from None
+            raise SyncthingTimeout('读取同步引擎超时') from None
         except (httpx.HTTPError, ValueError):
             raise SyncthingError('无法读取同步引擎响应，请检查地址与密钥') from None
 

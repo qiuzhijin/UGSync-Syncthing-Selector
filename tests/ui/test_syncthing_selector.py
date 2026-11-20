@@ -1,5 +1,6 @@
 from types import SimpleNamespace
 
+import pytest
 from PySide6.QtCore import Qt
 from PySide6.QtWidgets import QApplication, QDialog, QLineEdit
 
@@ -159,6 +160,33 @@ def test_missing_engine_starts_once_while_connection_pending(monkeypatch):
     assert called == ['spawn'] and window.starting
     window.exiting = True
     window.close()
+
+
+def test_login_retries_timeout_without_modal(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+    from syncthing_bridge.api import SyncthingTimeout
+
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    scheduled, attempts = [], []
+
+    def connect():
+        attempts.append(True)
+        raise SyncthingTimeout('读取同步引擎超时')
+
+    monkeypatch.setattr(window, 'connect_local', connect)
+    monkeypatch.setattr(ui.QTimer, 'singleShot', lambda delay, callback: scheduled.append(callback))
+    monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *args: pytest.fail('Unexpected startup dialog'))
+    try:
+        window.start_local_on_login()
+        assert '稍后自动重试' in window.status.text()
+        scheduled.pop(0)()
+        scheduled.pop(0)()
+        assert not scheduled and len(attempts) == 3
+        assert not window.startup_connection and '连接本机' in window.status.text()
+    finally:
+        window.exiting = True
+        window.close()
 
 
 def test_exit_stops_local_engine_before_interface(monkeypatch):

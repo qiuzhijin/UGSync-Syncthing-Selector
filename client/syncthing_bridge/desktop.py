@@ -6,6 +6,8 @@ import sys
 
 import httpx
 
+from syncthing_bridge.api import SyncthingTimeout
+
 RUN_KEY = r'Software\Microsoft\Windows\CurrentVersion\Run'
 RUN_VALUE = 'UGSyncSyncthing'
 
@@ -54,7 +56,7 @@ def engine_available(endpoint):
     except (httpx.ConnectError, httpx.ConnectTimeout):
         return False
     except httpx.TimeoutException:
-        raise RuntimeError('本机同步引擎响应超时，请稍后重试连接') from None
+        raise SyncthingTimeout('本机同步引擎响应超时，请稍后重试连接') from None
 
 
 def launch_engine():
