@@ -15,6 +15,28 @@ def isolate_saved_nas_credentials(monkeypatch):
     monkeypatch.setattr(ui, 'NasCredentialStore', lambda: SimpleNamespace(load=lambda endpoint: None))
 
 
+def test_directory_page_is_default_and_keeps_selection_when_switching_tabs():
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    try:
+        tabs = window.main_tabs
+        selection = tabs.widget(0)
+        settings = tabs.widget(1)
+        assert tabs.currentWidget() is selection
+        assert selection.isAncestorOf(window.tree)
+        assert settings.isAncestorOf(window.endpoint)
+        assert settings.isAncestorOf(window.nas_key)
+        assert settings.isAncestorOf(window.autostart)
+        assert settings.isAncestorOf(window.overlay_enabled)
+        window.all.setChecked(True)
+        tabs.setCurrentWidget(settings)
+        tabs.setCurrentWidget(selection)
+        assert window.all.isChecked()
+    finally:
+        window.exiting = True
+        window.close()
+
+
 def test_lazy_children_inherit_selection_and_can_be_excluded():
     app = QApplication.instance() or QApplication([])
     class Engine:
