@@ -8,7 +8,7 @@ import threading
 import time
 
 from syncthing_bridge.api import Syncthing
-from syncthing_bridge.selection import literal, parse_document
+from syncthing_bridge.selection import DIRECT_FILES_MARKER, literal, parse_document
 
 
 def selection_excludes(relative, rules, *, directory=False):
@@ -16,7 +16,7 @@ def selection_excludes(relative, rules, *, directory=False):
     if relative == '.':
         return False
     try:
-        _, entire, choices, escape = parse_document(rules)
+        base, entire, choices, escape = parse_document(rules)
     except ValueError:
         return False
     relative = relative.casefold()
@@ -30,7 +30,11 @@ def selection_excludes(relative, rules, *, directory=False):
     if not selected and not directory:
         parent = relative.rpartition('/')[0]
         helper = '!/' + (literal(parent, escape) + '/' if parent else '') + '*'
-        ordered = [line.casefold() for line in rules]
+        ordered = [line.casefold() for line in rules[len(base):]]
+        if DIRECT_FILES_MARKER.casefold() in ordered:
+            start = ordered.index(DIRECT_FILES_MARKER.casefold())
+            stop = ordered.index(DIRECT_FILES_MARKER.casefold(), start + 1)
+            return '!/' + literal(relative, escape) not in ordered[start:stop]
         if helper in ordered:
             if ancestor is None or ordered.index(helper) < ordered.index('/' + literal(ancestor, escape) + '/**'):
                 return False

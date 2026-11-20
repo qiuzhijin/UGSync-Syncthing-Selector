@@ -26,8 +26,10 @@ def verify(executable, gui_exit=False):
             target.parent.mkdir(parents=True, exist_ok=True)
             target.write_text('synthetic', encoding='utf-8')
         (data / '.stfolder').mkdir()
+        (data / '工作' / '缓存' / '未选空目录').mkdir()
         (data / '.stignore').write_text('\n'.join(compile_document(
-            ['*.tmp'], ['工作', '工作/缓存/保留[1]'], ['工作/缓存'], escape='|')) + '\n', encoding='utf-8')
+            ['*.tmp'], ['工作', '工作/缓存/保留[1]'], ['工作/缓存'], escape='|',
+            direct_files=['根目录.txt', '工作/缓存/直属.txt'])) + '\n', encoding='utf-8')
         flags = subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0
         subprocess.run([executable, 'generate', '--home', str(home)], check=True,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL, creationflags=flags)
@@ -76,14 +78,22 @@ def verify(executable, gui_exit=False):
                 response = client.get('/rest/db/browse', params={'folder': 'selector-test'})
                 response.raise_for_status()
                 names = []
+                directories = set()
                 def visit(rows, prefix=''):
                     for row in rows:
                         path = prefix + row['name']
                         if row['type'] == 'FILE_INFO_TYPE_FILE':
                             names.append(path)
+                        elif row['type'] == 'FILE_INFO_TYPE_DIRECTORY':
+                            directories.add(path)
                         visit(row.get('children', []), path + '/')
                 visit(response.json())
                 assert set(names) == expected, names
+                assert directories == {'工作', '工作/缓存', '工作/缓存/保留[1]'}, directories
+                response = client.get('/rest/db/browse', params={
+                    'folder': 'selector-test', 'prefix': '工作/缓存', 'levels': 1})
+                response.raise_for_status()
+                assert {row['name'] for row in response.json()} == {'直属.txt', '保留[1]'}, response.json()
                 if gui_exit:
                     from PySide6.QtWidgets import QApplication
                     import syncthing_bridge.__main__ as ui

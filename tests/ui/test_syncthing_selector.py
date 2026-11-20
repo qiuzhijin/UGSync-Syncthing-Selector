@@ -1,7 +1,7 @@
 from types import SimpleNamespace
 
 from PySide6.QtCore import Qt
-from PySide6.QtWidgets import QApplication, QLineEdit
+from PySide6.QtWidgets import QApplication, QDialog, QLineEdit
 
 from syncthing_bridge.__main__ import Window
 from syncthing_bridge.activity import ReadActivity
@@ -66,6 +66,50 @@ def test_direct_child_selection_keeps_siblings_excluded_and_restores_partial_par
     assert all(parent.child(i).checkState(0) == Qt.CheckState.Checked for i in range(2))
     window.exiting = True
     window.close()
+
+
+def test_saving_child_selection_includes_local_and_global_direct_files(monkeypatch, tmp_path):
+    app = QApplication.instance() or QApplication([])
+    parent = tmp_path / 'Work'
+    parent.mkdir()
+    (parent / 'local.txt').write_text('local')
+    (parent / 'LocalSibling').mkdir()
+    window = Window()
+    saved = []
+
+    class Engine:
+        def folders(self):
+            return [{'id': 'test', 'path': str(tmp_path)}]
+
+        def browse(self, folder, prefix='', *, directories_only=True):
+            if directories_only:
+                return [{'name': 'Work', 'type': 'FILE_INFO_TYPE_DIRECTORY'}]
+            if prefix == 'Work':
+                return [{'name': 'remote.txt', 'type': 'FILE_INFO_TYPE_FILE'},
+                        {'name': 'RemoteSibling', 'type': 'FILE_INFO_TYPE_DIRECTORY'}]
+            return []
+
+        def save_selection(self, folder, rules, previous):
+            saved.extend(rules)
+
+        def close(self):
+            pass
+
+    window.api = Engine()
+    window.folders.blockSignals(True)
+    window.folders.addItem('Test', 'test')
+    window.folders.blockSignals(False)
+    window.all.setChecked(False)
+    window.populate(None, '', False)
+    window.choices = {'Work/Keep': True}
+    monkeypatch.setattr(QDialog, 'exec', lambda self: QDialog.DialogCode.Accepted)
+    try:
+        window.preview()
+        assert [line for line in saved if line.startswith('!')] == [
+            '!/Work/local.txt', '!/Work/remote.txt', '!/Work/Keep', '!/Work/Keep/**']
+    finally:
+        window.exiting = True
+        window.close()
 
 
 def test_connect_local_attaches_without_starting_second_engine(monkeypatch):

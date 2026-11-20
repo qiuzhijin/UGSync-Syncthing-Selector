@@ -74,6 +74,14 @@ def test_v27_rules_with_helpers_after_exclusions_still_load():
     assert parse_selection(rules) == (False, {'Work/Keep': True, 'Work': False})
 
 
+def test_exact_direct_files_do_not_enable_unselected_directories():
+    rules = compile_selection(['Work/Keep'], direct_files=['Work/Notes [1].txt'])
+    assert '!/Work/Notes \\[1\\].txt' in rules
+    assert '!/Work/*' not in rules
+    assert '!/*' not in rules
+    assert parse_selection(rules) == (False, {'Work/Keep': True})
+
+
 @pytest.mark.parametrize('path', ['../x', '/x', 'a//b', 'a\\b', 'a\nb', ' a', 'a/..'])
 def test_reject_invalid_paths(path):
     with pytest.raises(ValueError):

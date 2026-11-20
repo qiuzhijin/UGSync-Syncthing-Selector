@@ -29,7 +29,22 @@ def _direct_file_parents(included, entire_root):
     return sorted(parents, key=lambda name: (-name.count('/'), name))
 
 
-def compile_selection(included=(), excluded=(), *, entire_root=False, escape='\\', _direct_files=True):
+def direct_file_parents(included, excluded, entire_root):
+    choices = {p: True for p in included} | {p: False for p in excluded}
+    parents = []
+    for parent in _direct_file_parents(included, False):
+        nearest = max((p for p in choices if parent == p or parent.startswith(p + '/')),
+                      key=len, default=None)
+        if not (choices[nearest] if nearest else entire_root):
+            parents.append(parent)
+    return parents
+
+
+DIRECT_FILES_MARKER = '// UGSync direct files'
+
+
+def compile_selection(included=(), excluded=(), *, entire_root=False, escape='\\',
+                      direct_files=None, _direct_files=True):
     if type(entire_root) is not bool:
         raise ValueError('根目录选择无效')
     includes = set(map(normalize, included))
@@ -38,7 +53,16 @@ def compile_selection(included=(), excluded=(), *, entire_root=False, escape='\\
         raise ValueError('目录不能同时包含和排除')
     rules = ['#escape=' + escape, '// Managed by UGSync Syncthing bridge']
     parents = set()
-    if _direct_files is True:
+    if direct_files is not None:
+        rules.append(DIRECT_FILES_MARKER)
+        allowed_parents = set(direct_file_parents(includes, excludes, entire_root))
+        for path in sorted(set(map(normalize, direct_files))):
+            if path.rpartition('/')[0] not in allowed_parents or path in (includes | excludes):
+                raise ValueError('直属文件不在已选范围内')
+            exact = '/' + literal(path, escape)
+            rules.extend([exact + '/**', '!' + exact])
+        rules.append(DIRECT_FILES_MARKER)
+    elif _direct_files is True:
         parents.update(_direct_file_parents(includes, False))
         if entire_root:
             parents = {p for p in parents if any(p == e or p.startswith(e + '/') for e in excludes)}
@@ -70,6 +94,20 @@ def parse_selection(rules, escape='\\'):
         return None
     entire = rules[-1] != '*'
     body = rules[2:] if entire else rules[2:-1]
+    files = None
+    if body and body[0] == DIRECT_FILES_MARKER:
+        if body.count(DIRECT_FILES_MARKER) != 2:
+            return None
+        end = body.index(DIRECT_FILES_MARKER, 1)
+        block, body = body[1:end], body[end + 1:]
+        if len(block) % 2:
+            return None
+        import re
+        files = []
+        for guard, include in zip(block[::2], block[1::2]):
+            if not include.startswith('!/') or guard != include[1:] + '/**':
+                return None
+            files.append(re.sub(re.escape(escape) + '(.)', r'\1', include[2:]))
     choices = {}
     index = 0
     while index < len(body):
@@ -103,6 +141,13 @@ def parse_selection(rules, escape='\\'):
         index += 2
     includes = [p for p, selected in choices.items() if selected]
     excludes = [p for p, selected in choices.items() if not selected]
+    if files is not None:
+        try:
+            canonical = compile_selection(includes, excludes, entire_root=entire,
+                                          escape=escape, direct_files=files)
+        except ValueError:
+            return None
+        return (entire, choices) if rules == canonical else None
     canonical = compile_selection(includes, excludes, entire_root=entire, escape=escape)
     legacy = compile_selection(includes, excludes, entire_root=entire, escape=escape, _direct_files=False)
     older_helpers = compile_selection(includes, excludes, entire_root=entire, escape=escape, _direct_files='legacy')
@@ -142,8 +187,9 @@ def parse_document(rules, *, native_escape='|'):
     return base, entire, {}, escape
 
 
-def compile_document(base, included=(), excluded=(), *, entire_root=False, escape='|'):
-    selected = compile_selection(included, excluded, entire_root=entire_root, escape=escape)
+def compile_document(base, included=(), excluded=(), *, entire_root=False, escape='|', direct_files=None):
+    selected = compile_selection(included, excluded, entire_root=entire_root, escape=escape,
+                                 direct_files=direct_files)
     preserved = list(base)
     if not any(line.strip().startswith('#escape=') for line in preserved):
         preserved.insert(0, '#escape=' + escape)

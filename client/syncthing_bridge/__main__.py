@@ -1,5 +1,7 @@
 """Run with: python -m syncthing_bridge."""
+import os
 import sys
+from pathlib import Path
 
 from PySide6.QtCore import Qt, QTimer, QThreadPool, Slot, QSettings
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSystemTrayIcon, QMenu, QStyle,
@@ -7,7 +9,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSys
     QMessageBox, QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from syncthing_bridge.api import Syncthing, local_credentials
-from syncthing_bridge.selection import normalize, parse_document, compile_document
+from syncthing_bridge.selection import normalize, parse_document, compile_document, direct_file_parents
 from syncthing_bridge.desktop import startup_enabled, set_startup, engine_available, launch_engine
 from syncthing_bridge.instance import SingleInstance
 from syncthing_bridge.progress import ProgressDisplay
@@ -502,14 +504,37 @@ class Window(QMainWindow):
             raise ValueError('请先恢复任务并加载目录树，再编辑选择')
         included = [p for p, selected in self.choices.items() if selected]
         excluded = [p for p, selected in self.choices.items() if not selected]
+        folder = self.folders.currentData()
+        parents = direct_file_parents(included, excluded, self.all.isChecked())
+        direct_files = []
+        if parents:
+            config = next(row for row in self.api.folders() if row['id'] == folder)
+            root = Path(os.path.expandvars(config['path'])).expanduser()
+            for parent in parents:
+                local = root / parent
+                rows = self.api.browse(folder, parent, directories_only=False)
+                directory_names = {row['name'].casefold() for row in rows
+                                   if row.get('type') == 'FILE_INFO_TYPE_DIRECTORY'}
+                names = {row['name'] for row in rows if row.get('type') == 'FILE_INFO_TYPE_FILE'}
+                if local.is_dir() and not local.is_symlink():
+                    for entry in local.iterdir():
+                        if entry.is_dir():
+                            directory_names.add(entry.name.casefold())
+                        elif entry.is_file() and not entry.is_symlink():
+                            names.add(entry.name)
+                direct_files.extend('/'.join(filter(None, (parent, name))) for name in names
+                                    if name.casefold() not in directory_names
+                                    and name.casefold() not in {'.stignore', '.stfolder', '.stversions'}
+                                    and not name.casefold().startswith(('.syncthing.', '~syncthing~')))
         rules = compile_document(self.base_rules, included, excluded,
-                                 entire_root=self.all.isChecked(), escape=self.escape)
+                                 entire_root=self.all.isChecked(), escape=self.escape,
+                                 direct_files=direct_files)
         dialog = QDialog(self)
         dialog.setWindowTitle('确认选择范围')
         dialog.resize(700, 500)
         layout = QVBoxLayout(dialog)
         layout.addWidget(QLabel('保存时自动暂停此任务，再替换本机忽略规则。保存后保持暂停。\n'
-                               'NAS 端通常保留完整目录；每台电脑可选择不同范围。'))
+                               '父目录新增直属文件后，请重新保存选择以纳入同步。'))
         text = QTextEdit()
         text.setReadOnly(True)
         text.setPlainText('当前规则：\n' + '\n'.join(self.previous) + '\n\n新规则：\n' + '\n'.join(rules))

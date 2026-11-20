@@ -123,9 +123,11 @@ class Syncthing:
         return {'paused': False, 'local': local, 'peers': peers,
                 'traffic': connections.get('total', {})}
 
-    def browse(self, folder, prefix=''):
-        value = self.request('GET', '/rest/db/browse', params={
-            'folder': folder, 'prefix': prefix, 'levels': 1, 'dirsonly': 'true'})
+    def browse(self, folder, prefix='', *, directories_only=True):
+        params = {'folder': folder, 'prefix': prefix, 'levels': 1}
+        if directories_only:
+            params['dirsonly'] = 'true'
+        value = self.request('GET', '/rest/db/browse', params=params)
         if not isinstance(value, list):
             raise SyncthingError('目录树格式不受支持')
         return value
