@@ -23,6 +23,9 @@ RestartApplications=no
 OutputBaseFilename=UGSync-Setup-v{#ProductVersion}-x64
 UninstallDisplayIcon={app}\UGSync-Syncthing-Selector.exe
 
+[Dirs]
+Name: "{app}\logs"; Permissions: users-modify
+
 [Files]
 Source: "{#BundleDir}\UGSync-Syncthing-Selector.exe"; DestDir: "{app}"; Flags: ignoreversion
 Source: "{#BundleDir}\_internal\*"; DestDir: "{app}\_internal"; Flags: ignoreversion recursesubdirs createallsubdirs

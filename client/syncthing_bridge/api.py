@@ -3,6 +3,8 @@ from urllib.parse import urlsplit
 
 import httpx
 
+from syncthing_bridge.diagnostics import logger
+
 
 def local_credentials(config_path=None):
     import os
@@ -51,22 +53,35 @@ class Syncthing:
         self.http.close()
 
     def request(self, method, route, **kwargs):
+        log_route = '/rest/config/folders/{id}' if route.startswith('/rest/config/folders/') else route
         try:
             with self.http.stream(method, route, **kwargs) as response:
                 if response.status_code not in (200, 204):
+                    reason = 'request_rejected'
+                    if route == '/rest/db/browse' and response.status_code == 500:
+                        try:
+                            body = next(response.iter_bytes(chunk_size=512), b'')
+                            if b'could not find child' in body:
+                                reason = 'missing_directory_parent'
+                        except httpx.HTTPError:
+                            pass
+                    logger.error('%s %s HTTP %s reason=%s', method, log_route, response.status_code, reason)
                     raise SyncthingError('同步引擎拒绝请求（HTTP %s）' % response.status_code)
                 data = bytearray()
                 for chunk in response.iter_bytes():
                     data.extend(chunk)
                     if len(data) > 4 << 20:
+                        logger.error('%s %s reason=response_limit', method, log_route)
                         raise SyncthingError('目录或配置过大，请缩小范围')
                 if not data:
                     return None
                 import json
                 return json.loads(data)
         except httpx.TimeoutException:
+            logger.error('%s %s reason=timeout', method, log_route)
             raise SyncthingTimeout('读取同步引擎超时') from None
-        except (httpx.HTTPError, ValueError):
+        except (httpx.HTTPError, ValueError) as error:
+            logger.error('%s %s reason=%s', method, log_route, type(error).__name__)
             raise SyncthingError('无法读取同步引擎响应，请检查地址与密钥') from None
 
     def folders(self):
@@ -128,7 +143,8 @@ class Syncthing:
                 'traffic': connections.get('total', {})}
 
     def browse(self, folder, prefix='', *, directories_only=True):
-        params = {'folder': folder, 'prefix': prefix, 'levels': 1}
+        # The UI expands one level at a time. Deeper index entries can refer to missing parents.
+        params = {'folder': folder, 'prefix': prefix, 'levels': 0}
         if directories_only:
             params['dirsonly'] = 'true'
         value = self.request('GET', '/rest/db/browse', params=params)

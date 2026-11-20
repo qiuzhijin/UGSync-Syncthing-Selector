@@ -125,6 +125,27 @@ def test_selection_restoration_preserves_unloaded_descendant_overrides():
     assert parse_selection(['custom-pattern']) is None
 
 
+@pytest.mark.parametrize('directories_only', [True, False])
+def test_browse_reads_only_direct_entries_despite_missing_deeper_parent(directories_only):
+    rows = [{'name': 'Existing', 'type': 'FILE_INFO_TYPE_DIRECTORY'}]
+    if not directories_only:
+        rows.append({'name': 'notes.txt', 'type': 'FILE_INFO_TYPE_FILE'})
+
+    def handler(request):
+        assert request.url.path == '/rest/db/browse'
+        assert request.url.params['prefix'] == 'Learning'
+        assert ('dirsonly' in request.url.params) == directories_only
+        if request.url.params['levels'] != '0':
+            return httpx.Response(500, text="could not find child 'AI' for path 'AI/EcoDrive' in parent ''")
+        return httpx.Response(200, json=rows)
+
+    api = Syncthing('http://127.0.0.1:8384', 'test-key', transport=httpx.MockTransport(handler))
+    try:
+        assert api.browse('test', 'Learning', directories_only=directories_only) == rows
+    finally:
+        api.close()
+
+
 def test_new_folder_without_ignore_file_is_empty_rules():
     api = Syncthing('http://127.0.0.1:8384', 'test-key', transport=httpx.MockTransport(
         lambda _: httpx.Response(200, json={'ignore': None, 'error': None})))

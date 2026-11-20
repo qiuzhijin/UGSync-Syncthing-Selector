@@ -3,7 +3,8 @@ import os
 import sys
 from pathlib import Path
 
-from PySide6.QtCore import Qt, QTimer, QThreadPool, Slot, QSettings
+from PySide6.QtCore import Qt, QTimer, QThreadPool, Slot, QSettings, QUrl
+from PySide6.QtGui import QDesktopServices
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSystemTrayIcon, QMenu, QStyle,
     QDialogButtonBox, QFormLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar,
     QMessageBox, QPushButton, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
@@ -11,6 +12,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSys
 from syncthing_bridge.api import Syncthing, SyncthingTimeout, local_credentials
 from syncthing_bridge.selection import normalize, parse_document, compile_document, direct_file_parents
 from syncthing_bridge.desktop import startup_enabled, set_startup, engine_available, launch_engine
+from syncthing_bridge.diagnostics import application_log, report_exception
 from syncthing_bridge.instance import SingleInstance
 from syncthing_bridge.progress import ProgressDisplay
 from syncthing_bridge.activity import ActivityPanel, ReadActivity
@@ -21,7 +23,7 @@ from syncthing_bridge.winsparkle import configure_updates
 
 
 class Window(QMainWindow):
-    def __init__(self):
+    def __init__(self, *, log_path=None):
         super().__init__()
         self.api = None
         self.previous = []
@@ -100,7 +102,7 @@ class Window(QMainWindow):
         self.tree.setStyleSheet('QTreeWidget::indicator:indeterminate { background: #1689ed; '
                                'border: 1px solid #1689ed; border-radius: 2px; image: none; }')
         self.tree.setHeaderLabels(['目录选择（展开后加载，仍受现有排除规则约束）'])
-        self.tree.itemExpanded.connect(lambda item: self.run(lambda: self.expand(item)))
+        self.tree.itemExpanded.connect(lambda item: self.run(lambda: self.expand(item), 'expand_directory'))
         self.tree.itemChanged.connect(self.changed)
         layout.addWidget(self.tree, 1)
         row = QHBoxLayout()
@@ -108,9 +110,9 @@ class Window(QMainWindow):
         preview.clicked.connect(lambda: self.run(self.preview))
         row.addWidget(preview)
         pause = QPushButton('暂停')
-        pause.clicked.connect(lambda: self.run(lambda: self.pause_current(True)))
+        pause.clicked.connect(lambda: self.run(lambda: self.pause_current(True), 'pause_sync'))
         resume = QPushButton('继续同步')
-        resume.clicked.connect(lambda: self.run(lambda: self.pause_current(False)))
+        resume.clicked.connect(lambda: self.run(lambda: self.pause_current(False), 'resume_sync'))
         refresh = QPushButton('刷新状态')
         refresh.clicked.connect(lambda: self.run(self.refresh_status))
         for button in (pause, resume, refresh):
@@ -127,6 +129,8 @@ class Window(QMainWindow):
         self.tray.setToolTip('文件夹同步 · Syncthing')
         menu = QMenu(self)
         menu.addAction('打开同步窗口', self.show_window)
+        if log_path is not None:
+            menu.addAction('打开日志文件夹', lambda: QDesktopServices.openUrl(QUrl.fromLocalFile(str(log_path.parent))))
         try:
             self.software_updates = configure_updates(self, menu)
         except (OSError, ValueError, AttributeError):
@@ -244,6 +248,7 @@ class Window(QMainWindow):
             if not overlay_extension_installed() and not install_overlay_extension():
                 raise OverlayInstallError('角标扩展未安装。')
         except OverlayInstallError as error:
+            report_exception('install_explorer_overlay', error)
             self.disable_overlays(str(error))
             return
         self.overlay_preferences.setValue('enabled', True)
@@ -335,6 +340,7 @@ class Window(QMainWindow):
         try:
             action()
         except Exception as error:
+            report_exception('login_startup', error)
             if isinstance(error, SyncthingTimeout) and retries:
                 self.status.setText('同步引擎响应超时，稍后自动重试…')
                 QTimer.singleShot(5000, lambda: self.try_startup_connection(action, retries - 1))
@@ -383,10 +389,11 @@ class Window(QMainWindow):
         if self.activity_panel.isVisible():
             self.refresh_activity()
 
-    def run(self, action):
+    def run(self, action, operation=None):
         try:
             action()
         except Exception as error:
+            report_exception(operation or getattr(action, '__name__', 'ui_action'), error)
             QMessageBox.warning(self, '操作未完成', str(error))
 
     def connect_engine(self):
@@ -602,19 +609,23 @@ def main():
             QMessageBox.information(None, '文件夹同步', str(error))
             return 1
         app.aboutToQuit.connect(guard.release)
-    window = Window()
-    active_window.append(window)
-    window.show()
-    if '--startup-check' in sys.argv:
-        QTimer.singleShot(200, app.quit)
-    else:
-        if '--autostart' in sys.argv:
-            if window.tray.isVisible():
-                window.hide()
-            QTimer.singleShot(0, window.start_local_on_login)
-        else:
-            QTimer.singleShot(0, lambda: window.run(window.connect_local))
-    return app.exec()
+    with application_log() as log_path:
+        try:
+            window = Window(log_path=log_path)
+            active_window.append(window)
+            window.show()
+            if '--startup-check' in sys.argv:
+                QTimer.singleShot(200, app.quit)
+            elif '--autostart' in sys.argv:
+                if window.tray.isVisible():
+                    window.hide()
+                QTimer.singleShot(0, window.start_local_on_login)
+            else:
+                QTimer.singleShot(0, lambda: window.run(window.connect_local))
+            return app.exec()
+        except Exception as error:
+            report_exception('application', error)
+            raise
 
 
 if __name__ == '__main__':

@@ -91,7 +91,7 @@ def verify(executable, gui_exit=False):
                 assert set(names) == expected, names
                 assert directories == {'工作', '工作/缓存', '工作/缓存/保留[1]'}, directories
                 response = client.get('/rest/db/browse', params={
-                    'folder': 'selector-test', 'prefix': '工作/缓存', 'levels': 1})
+                    'folder': 'selector-test', 'prefix': '工作/缓存', 'levels': 0})
                 response.raise_for_status()
                 assert {row['name'] for row in response.json()} == {'直属.txt', '保留[1]'}, response.json()
                 if gui_exit:
