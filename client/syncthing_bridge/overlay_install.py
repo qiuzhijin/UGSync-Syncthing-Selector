@@ -9,6 +9,7 @@ import sys
 _IDS = ('{A22F0821-2B78-49CE-B27C-1041D875B011}',
         '{A22F0822-2B78-49CE-B27C-1041D875B011}',
         '{A22F0823-2B78-49CE-B27C-1041D875B011}')
+_EXPLORER_OVERLAYS = r'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers'
 _PAYLOAD_FILES = ('UGSyncOverlay.dll', 'blue.ico', 'green.ico', 'red.ico',
                   'overlay-manifest.json', 'install_overlays.ps1')
 
@@ -22,13 +23,14 @@ def overlay_extension_installed():
         return False
     try:
         import winreg
-        for identifier in _IDS:
-            key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
-                                 'SOFTWARE\\Classes\\CLSID\\' + identifier + '\\InprocServer32')
-            try:
+        for color, identifier in zip(('Blue', 'Green', 'Red'), _IDS):
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f'{_EXPLORER_OVERLAYS}\\ 08UGSync {color}') as key:
+                registered, _ = winreg.QueryValueEx(key, None)
+            if not isinstance(registered, str) or registered.casefold() != identifier.casefold():
+                return False
+            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,
+                                'SOFTWARE\\Classes\\CLSID\\' + identifier + '\\InprocServer32') as key:
                 library, _ = winreg.QueryValueEx(key, None)
-            finally:
-                winreg.CloseKey(key)
             if not isinstance(library, str) or not Path(library).is_file():
                 return False
     except OSError:

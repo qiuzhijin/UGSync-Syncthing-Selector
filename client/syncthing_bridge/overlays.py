@@ -146,12 +146,28 @@ class OverlayPublisher:
                     self.records[name] = (None, stamp, size)
                     self.notify(name)
 
+    def wait_for_work(self, *, wake_on_request):
+        if not wake_on_request:
+            self.stop_event.wait(2)
+            return
+        for _ in range(10):
+            if self.stop_event.wait(.2):
+                return
+            try:
+                with os.scandir(self.cache / 'requests') as requests:
+                    if any(entry.name.lower().endswith('.txt') for entry in requests):
+                        return
+            except OSError:
+                # A missing or unavailable request directory should not cause a busy loop.
+                continue
+
     def run(self):
         api = Syncthing(self.endpoint, self.key)
         api.http.timeout = 3
         index = 0
         try:
             while not self.stop_event.is_set():
+                wake_on_request = False
                 try:
                     folders = api.folders()
                     for folder in folders[:16]:
@@ -192,10 +208,11 @@ class OverlayPublisher:
                             self.invalidate(path)
                     for directory in changed_directories:
                         self.notify_directory(directory)
+                    wake_on_request = True
                 except Exception:
                     # Cached green expires. An unreachable engine is not proof of pause.
                     self.invalidate()
-                self.stop_event.wait(2)
+                self.wait_for_work(wake_on_request=wake_on_request)
         finally:
             api.close()
 

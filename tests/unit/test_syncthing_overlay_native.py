@@ -1,4 +1,5 @@
 import ctypes
+from contextlib import nullcontext
 import os
 from pathlib import Path
 import sys
@@ -7,6 +8,33 @@ import time
 import pytest
 
 from syncthing_bridge.overlays import OverlayPublisher, cache_key
+from syncthing_bridge.overlay_install import overlay_extension_installed
+
+
+@pytest.mark.skipif(sys.platform != 'win32', reason='Windows registry')
+@pytest.mark.parametrize('green', [None, '{INVALID}', '{A22F0822-2B78-49CE-B27C-1041D875B011}'])
+def test_overlay_detection_requires_explorer_handlers_even_when_dll_exists(tmp_path, monkeypatch, green):
+    import winreg
+
+    dll = tmp_path / 'Overlay.dll'
+    dll.touch()
+    prefix = r'SOFTWARE\Microsoft\Windows\CurrentVersion\Explorer\ShellIconOverlayIdentifiers'
+    ids = ('{A22F0821-2B78-49CE-B27C-1041D875B011}',
+           '{A22F0822-2B78-49CE-B27C-1041D875B011}',
+           '{A22F0823-2B78-49CE-B27C-1041D875B011}')
+    values = {f'SOFTWARE\\Classes\\CLSID\\{clsid}\\InprocServer32': str(dll) for clsid in ids}
+    for color, value in zip(('Blue', 'Green', 'Red'), (ids[0], green, ids[2])):
+        if value is not None:
+            values[f'{prefix}\\ 08UGSync {color}'] = value
+
+    def open_key(root, subkey, *args):
+        if subkey not in values:
+            raise FileNotFoundError(subkey)
+        return nullcontext(values[subkey])
+
+    monkeypatch.setattr(winreg, 'OpenKey', open_key)
+    monkeypatch.setattr(winreg, 'QueryValueEx', lambda key, _name: (key, winreg.REG_SZ))
+    assert overlay_extension_installed() is (green == ids[1])
 
 
 @pytest.mark.skipif(sys.platform != 'win32', reason='native Explorer extension')

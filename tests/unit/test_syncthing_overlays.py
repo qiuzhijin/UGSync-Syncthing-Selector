@@ -120,3 +120,27 @@ def test_root_listing_notifies_explorer_after_becoming_available(tmp_path):
     publisher.publish_roots([root])
     publisher.publish_roots([root])
     assert notifications == [root]
+
+
+def test_new_explorer_request_wakes_publisher_before_periodic_refresh(tmp_path, monkeypatch):
+    from syncthing_bridge.overlays import OverlayPublisher
+
+    publisher = OverlayPublisher('http://127.0.0.1:8384', 'test', cache=tmp_path)
+    requests = tmp_path / 'requests'
+    requests.mkdir()
+    waits = []
+
+    def wait(seconds):
+        waits.append(seconds)
+        if len(waits) == 2:
+            (requests / 'new.txt').touch()
+        return False
+
+    monkeypatch.setattr(publisher.stop_event, 'wait', wait)
+    publisher.wait_for_work(wake_on_request=True)
+    assert sum(waits) < 2
+
+    (requests / 'new.txt').unlink()
+    waits.clear()
+    publisher.wait_for_work(wake_on_request=False)
+    assert sum(waits) == 2
