@@ -23,3 +23,7 @@ Windows x64 安装程序见 [GitHub Releases](https://github.com/qiuzhijin/UGSyn
 打包使用 `scripts/syncthing-selector.spec` 和 `scripts/ugsync-setup.iss`。前者需要官方 Syncthing Windows x64 归档和 `scripts/build_overlays.ps1` 生成的角标组件。配置 `UGSYNC_WINSPARKLE_DLL` 与 `UGSYNC_WINSPARKLE_CHANNEL` 可把 WinSparkle x64 DLL 和 `scripts/winsparkle-channel.json` 的公开更新配置加入构建。Inno Setup 接收 `/DBundleDir=<完整客户端路径>` 与 `/DProductVersion=<版本>`。程序目录须包含项目许可证和 [第三方材料](docs/selector-third-party-sources.md)。
 
 项目自有代码采用 [MIT](LICENSE)。Syncthing、Qt for Python 等第三方软件遵循各自的许可。同步会传播选中范围内的删除，重要数据应另有独立备份。
+
+## 鸣谢
+
+感谢 [Syncthing](https://github.com/syncthing/syncthing) 的维护者和贡献者。UGSync 使用 Syncthing 作为文件同步引擎，由它负责设备间的文件传输、冲突处理和版本保留。
