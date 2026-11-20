@@ -51,18 +51,25 @@ class ReadActivity(QRunnable):
 class ActivityPanel(QFrame):
     def __init__(self, owner):
         super().__init__(owner, Qt.WindowType.Popup)
+        from syncthing_bridge.appearance import apply_appearance
+
+        self.setObjectName('activitySurface')
+        apply_appearance(self)
         self.setWindowTitle('同步动态')
         self.resize(460, 540)
         self.setMinimumSize(360, 420)
         self.page = 1
         layout = QVBoxLayout(self)
+        layout.setContentsMargins(14, 12, 14, 12)
+        layout.setSpacing(9)
         self.heading = QLabel('同步动态')
         self.heading.setTextFormat(Qt.TextFormat.PlainText)
-        self.heading.setStyleSheet('font-size: 18px; font-weight: bold;')
+        self.heading.setProperty('role', 'title')
         layout.addWidget(self.heading)
         self.progress = QProgressBar()
         layout.addWidget(self.progress)
         self.detail = QLabel('正在读取状态…')
+        self.detail.setProperty('role', 'muted')
         self.detail.setTextFormat(Qt.TextFormat.PlainText)
         self.detail.setWordWrap(True)
         layout.addWidget(self.detail)
@@ -90,10 +97,12 @@ class ActivityPanel(QFrame):
         pages.addWidget(self.next_page)
         layout.addLayout(pages)
         self.note = QLabel('等待连接。最近完成包含接收记录和本次运行确认的对端接收记录。')
+        self.note.setProperty('role', 'muted')
         self.note.setWordWrap(True)
         layout.addWidget(self.note)
         buttons = QHBoxLayout()
         settings = QPushButton('目录选择 / 设置')
+        settings.setProperty('primary', True)
         settings.clicked.connect(lambda: (self.hide(), owner.show_window()))
         buttons.addWidget(settings)
         refresh = QPushButton('刷新')
@@ -125,7 +134,7 @@ class ActivityPanel(QFrame):
         if percent is not None:
             self.progress.setValue(percent)
         self.progress.setFormat(title)
-        self.detail.setText(title + '\n' + detail)
+        self.detail.setText(detail)
 
     def display(self, result, error):
         for tree in self.lists.values():
