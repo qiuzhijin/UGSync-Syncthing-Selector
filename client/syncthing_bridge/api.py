@@ -104,14 +104,14 @@ class Syncthing:
         """Return a bounded remote device download view without inferring file sources."""
         if type(page) is not int or page < 1:
             raise ValueError('页码无效')
-        need = self.request('GET', '/rest/db/need', params={'folder': folder, 'page': page, 'perpage': 30})
+        need = self.request('GET', '/rest/db/need', params={'folder': folder, 'page': page, 'perpage': 30}) or {}
         result = {'current': [], 'queue': [], 'has_more':
-                  sum(len(need.get(key, [])) for key in ('progress', 'queued', 'rest')) >= 30}
-        for item in need.get('progress', []):
+                  sum(len(need.get(key) or []) for key in ('progress', 'queued', 'rest')) >= 30}
+        for item in need.get('progress') or []:
             result['current'].append({'name': item['name'], 'status': 'NAS 正在下载',
                                       'direction': '来源由 NAS Syncthing 选择'})
         for section in ('queued', 'rest'):
-            for item in need.get(section, []):
+            for item in need.get(section) or []:
                 result['queue'].append({'name': item['name'], 'status': 'NAS 等待下载',
                                         'direction': '来源由 NAS Syncthing 选择'})
         return result
@@ -159,10 +159,17 @@ class Syncthing:
         current = next(row for row in self.folders() if row['id'] == folder)
         result = {'current': [], 'queue': [], 'recent': [], 'notices': [], 'tracked': list(tracked),
                   'uploads': [], 'page': page, 'has_more': False}
-        events = self.request('GET', '/rest/events', params={
+        def read(route, notice, **kwargs):
+            try:
+                return self.request('GET', route, **kwargs)
+            except SyncthingError as error:
+                result['notices'].append({'name': notice, 'status': str(error)})
+                return None
+
+        events = read('/rest/events', '最近完成记录暂不可读', params={
             'events': 'ItemFinished,LocalChangeDetected', 'since': 0, 'limit': 100, 'timeout': 0})
         for event in reversed(events or []):
-            data = event.get('data', {})
+            data = event.get('data') or {}
             if data.get('folder') != folder:
                 continue
             if event.get('type') == 'LocalChangeDetected':
@@ -183,15 +190,22 @@ class Syncthing:
         if current.get('paused'):
             result['notices'].append({'name': '任务已暂停', 'status': '队列暂不可读取，不能据空列表判断已完成'})
             return result
-        need = self.request('GET', '/rest/db/need', params={'folder': folder, 'page': page, 'perpage': 30})
-        result['has_more'] = sum(len(need.get(k, [])) for k in ('progress', 'queued', 'rest')) >= 30
-        for item in need.get('progress', []):
+        need = read('/rest/db/need', '本机下载队列暂不可读', params={'folder': folder, 'page': page, 'perpage': 30})
+        if need is None:
+            result['queue_incomplete'] = True
+            need = {}
+        result['has_more'] = sum(len(need.get(k) or []) for k in ('progress', 'queued', 'rest')) >= 30
+        for item in need.get('progress') or []:
             result['current'].append({'name': item['name'], 'status': '正在下载到本机', 'direction': '对端 → 本机'})
         for section in ('queued', 'rest'):
-            for item in need.get(section, []):
+            for item in need.get(section) or []:
                 result['queue'].append({'name': item['name'], 'status': '等待下载到本机', 'direction': '对端 → 本机'})
-        identity = self.request('GET', '/rest/system/status')['myID']
-        connections = self.request('GET', '/rest/system/connections').get('connections', {})
+        identity = (read('/rest/system/status', '本机设备状态暂不可读') or {}).get('myID')
+        connection_status = read('/rest/system/connections', '对端连接状态暂不可读')
+        if not identity or connection_status is None:
+            result['queue_incomplete'] = True
+            return result
+        connections = connection_status.get('connections') or {}
         peers = [d['deviceID'] for d in current.get('devices', [])
                  if d['deviceID'] != identity and connections.get(d['deviceID'], {}).get('connected')]
         for device in current.get('devices', []):
@@ -212,8 +226,9 @@ class Syncthing:
                     'status': f'对端待接收队列暂不可用：{error}'})
                 continue
             queried.add(device)
-            result['has_more'] |= len(need.get('files', [])) >= 30
-            for item in need.get('files', []):
+            files = (need or {}).get('files') or []
+            result['has_more'] |= len(files) >= 30
+            for item in files:
                 result['queue'].append({'name': item['name'], 'status': '等待上传至对端',
                     'device': device, 'direction': '本机 → 对端 ' + device[:7]})
                 if item.get('version') and not item.get('deleted') and not item.get('type', '').endswith('DIRECTORY'):

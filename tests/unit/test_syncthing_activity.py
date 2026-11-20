@@ -24,6 +24,33 @@ def test_progress_snapshot_checks_only_first_folder_error_when_status_has_a_coun
     api.close()
 
 
+@pytest.mark.parametrize('failed_route', ['/rest/events', '/rest/db/need', '/rest/system/connections', None])
+def test_activity_keeps_available_sections_if_one_request_fails_or_returns_null(failed_route):
+    values = {
+        '/rest/config/folders': [{'id': 'drive', 'devices': [{'deviceID': 'nas'}]}],
+        '/rest/events': [{'type': 'ItemFinished', 'data': {'folder': 'drive', 'type': 'file', 'item': 'done.txt'}}],
+        '/rest/db/need': {'progress': [{'name': 'active.txt'}], 'queued': None, 'rest': None},
+        '/rest/system/status': {'myID': 'pc'},
+        '/rest/system/connections': {'connections': {'nas': {'connected': True}}},
+        '/rest/db/remoteneed': {'files': None},
+    }
+
+    def respond(request):
+        route = request.url.path
+        if route == failed_route:
+            return httpx.Response(500)
+        return httpx.Response(200, json=values[route])
+
+    api = Syncthing('http://127.0.0.1:8384', 'synthetic', transport=httpx.MockTransport(respond))
+    try:
+        result = api.activity('drive')
+    finally:
+        api.close()
+    assert [row['name'] for row in result['current']] == ([] if failed_route == '/rest/db/need' else ['active.txt'])
+    assert [row['name'] for row in result['recent']] == ([] if failed_route == '/rest/events' else ['done.txt'])
+    assert bool(result['notices']) == bool(failed_route)
+
+
 def test_local_file_and_directory_deletions_are_visible_without_claiming_remote_completion():
     def respond(request):
         if request.url.path == '/rest/events':

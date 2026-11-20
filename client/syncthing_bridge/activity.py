@@ -1,4 +1,5 @@
 """Read-only tray activity panel. Network reads run outside the UI thread."""
+from contextlib import closing
 from datetime import datetime
 
 import httpx
@@ -7,6 +8,7 @@ from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
     QProgressBar, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
 from syncthing_bridge.api import Syncthing
+from syncthing_bridge.diagnostics import report_exception
 
 
 class Result(QObject):
@@ -23,29 +25,28 @@ class ReadActivity(QRunnable):
         self.signals = Result()
 
     def run(self):
-        api = Syncthing(self.endpoint, self.key)
-        api.http.timeout = httpx.Timeout(4)
         try:
-            result = api.activity(self.folder, tracked=self.tracked, page=self.page)
+            with closing(Syncthing(self.endpoint, self.key)) as api:
+                api.http.timeout = httpx.Timeout(4)
+                result = api.activity(self.folder, tracked=self.tracked, page=self.page)
             if bool(self.nas_endpoint) != bool(self.nas_key):
                 result['notices'].append({'name': 'NAS 动态未连接', 'status': '请同时填写 NAS Syncthing 地址和 API 密钥'})
             elif self.nas_endpoint:
-                nas = Syncthing(self.nas_endpoint, self.nas_key)
-                nas.http.timeout = httpx.Timeout(4)
                 try:
-                    remote = nas.download_activity(self.folder, page=self.page)
+                    with closing(Syncthing(self.nas_endpoint, self.nas_key)) as nas:
+                        nas.http.timeout = httpx.Timeout(4)
+                        remote = nas.download_activity(self.folder, page=self.page)
                     result['current'].extend(remote['current'])
                     result['queue'].extend(remote['queue'])
                     result['has_more'] |= remote['has_more']
-                except Exception:
+                except Exception as error:
+                    report_exception('read_nas_activity', error)
+                    result['queue_incomplete'] = True
                     result['notices'].append({'name': 'NAS 动态未读取', 'status': '无法读取 NAS Syncthing 状态，请检查地址、密钥和文件夹 ID'})
-                finally:
-                    nas.close()
             self.signals.ready.emit(result, None)
-        except Exception:
+        except Exception as error:
+            report_exception('read_local_activity', error)
             self.signals.ready.emit(None, '无法读取文件动态，请检查同步引擎连接。')
-        finally:
-            api.close()
 
 
 class ActivityPanel(QFrame):
@@ -149,7 +150,7 @@ class ActivityPanel(QFrame):
         self.previous_page.setEnabled(self.page > 1)
         self.next_page.setEnabled(result.get('has_more', False))
         page_items = len(result.get('current', [])) + len(result.get('queue', []))
-        suffix = '（部分对端队列未读取）' if result.get('queue_incomplete') else ''
+        suffix = '（部分队列未读取）' if result.get('queue_incomplete') else ''
         self.page_label.setText('传输 / 队列：第 %s 页 · 本页 %s 项%s' % (self.page, page_items, suffix))
         for key, rows in result.items():
             if key not in self.lists:
