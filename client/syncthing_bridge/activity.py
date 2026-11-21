@@ -15,6 +15,24 @@ class Result(QObject):
     ready = Signal(object, object)
 
 
+class ReadProgress(QRunnable):
+    def __init__(self, endpoint, key, folder):
+        super().__init__()
+        self.endpoint, self.key, self.folder = endpoint, key, folder
+        self.signals = Result()
+
+    def run(self):
+        try:
+            with closing(Syncthing(self.endpoint, self.key)) as api:
+                api.http.timeout = httpx.Timeout(4)
+                snapshot = api.progress_snapshot(self.folder)
+        except Exception as error:
+            report_exception('read_progress', error)
+            self.signals.ready.emit(None, error)
+        else:
+            self.signals.ready.emit(snapshot, None)
+
+
 class ReadActivity(QRunnable):
     def __init__(self, endpoint, key, folder, tracked, page=1, nas_endpoint='', nas_key=''):
         super().__init__()
@@ -29,12 +47,22 @@ class ReadActivity(QRunnable):
             with closing(Syncthing(self.endpoint, self.key)) as api:
                 api.http.timeout = httpx.Timeout(4)
                 result = api.activity(self.folder, tracked=self.tracked, page=self.page)
+                peers = set()
+                if self.nas_endpoint and self.nas_key:
+                    try:
+                        task = next(row for row in api.folders() if row['id'] == self.folder)
+                        local_id = api.request('GET', '/rest/system/status')['myID']
+                        peers = {device['deviceID'] for device in task.get('devices', [])} - {local_id}
+                    except Exception as error:
+                        report_exception('verify_nas_activity_peer', error)
             if bool(self.nas_endpoint) != bool(self.nas_key):
                 result['notices'].append({'name': 'NAS 动态未连接', 'status': '请同时填写 NAS Syncthing 地址和 API 密钥'})
             elif self.nas_endpoint:
                 try:
                     with closing(Syncthing(self.nas_endpoint, self.nas_key)) as nas:
                         nas.http.timeout = httpx.Timeout(4)
+                        if not peers or nas.request('GET', '/rest/system/status')['myID'] not in peers:
+                            raise ValueError('NAS 设备与此同步任务不匹配')
                         remote = nas.download_activity(self.folder, page=self.page)
                     result['current'].extend(remote['current'])
                     result['queue'].extend(remote['queue'])
@@ -42,7 +70,7 @@ class ReadActivity(QRunnable):
                 except Exception as error:
                     report_exception('read_nas_activity', error)
                     result['queue_incomplete'] = True
-                    result['notices'].append({'name': 'NAS 动态未读取', 'status': '无法读取 NAS Syncthing 状态，请检查地址、密钥和文件夹 ID'})
+                    result['notices'].append({'name': 'NAS 动态未读取', 'status': '请检查 NAS 地址、密钥及设备是否共享此任务'})
             self.signals.ready.emit(result, None)
         except Exception as error:
             report_exception('read_local_activity', error)

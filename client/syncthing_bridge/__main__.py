@@ -17,7 +17,7 @@ from syncthing_bridge.desktop import startup_enabled, set_startup, engine_availa
 from syncthing_bridge.diagnostics import application_log, report_exception
 from syncthing_bridge.instance import SingleInstance
 from syncthing_bridge.progress import ProgressDisplay
-from syncthing_bridge.activity import ActivityPanel, ReadActivity
+from syncthing_bridge.activity import ActivityPanel, ReadActivity, ReadProgress
 from syncthing_bridge.overlays import OverlayPublisher
 from syncthing_bridge.nas_credentials import NasCredentialError, NasCredentialStore
 from syncthing_bridge.overlay_install import OverlayInstallError, install_overlay_extension, overlay_extension_installed
@@ -38,6 +38,9 @@ class Window(QMainWindow):
         self.startup_connection = False
         self.launch_checks = 0
         self.progress_display = ProgressDisplay()
+        self.progress_worker = None
+        self.engine_credentials = None
+        self.incomplete_directories = set()
         self.activity_worker = None
         self.activity_context = None
         self.activity_tracked = []
@@ -159,6 +162,10 @@ class Window(QMainWindow):
         self.tree.itemExpanded.connect(lambda item: self.run(lambda: self.expand(item), 'expand_directory'))
         self.tree.itemChanged.connect(self.changed)
         layout.addWidget(self.tree, 1)
+        self.directory_notice = QLabel()
+        self.directory_notice.setWordWrap(True)
+        self.directory_notice.hide()
+        layout.addWidget(self.directory_notice)
         row = QHBoxLayout()
         preview = QPushButton('预览并保存选择')
         preview.setProperty('primary', True)
@@ -169,7 +176,7 @@ class Window(QMainWindow):
         resume = QPushButton('继续同步')
         resume.clicked.connect(lambda: self.run(lambda: self.pause_current(False), 'resume_sync'))
         refresh = QPushButton('刷新状态')
-        refresh.clicked.connect(lambda: self.run(self.refresh_status))
+        refresh.clicked.connect(self.refresh_status)
         for button in (pause, resume, refresh):
             row.addWidget(button)
         layout.addLayout(row)
@@ -438,9 +445,16 @@ class Window(QMainWindow):
 
     def refresh_status(self):
         folder = self.folders.currentData()
-        if not self.api or not folder:
+        if not self.api or not folder or not self.engine_credentials or self.progress_worker is not None:
             return
-        percent, title, detail = self.progress_display.update(self.api.progress_snapshot(folder))
+        self.progress_context = (self.api, folder, self.progress_display)
+        worker = ReadProgress(*self.engine_credentials, folder)
+        self.progress_worker = worker
+        worker.signals.ready.connect(self.progress_ready)
+        QThreadPool.globalInstance().start(worker)
+
+    def display_progress(self, snapshot):
+        percent, title, detail = self.progress_display.update(snapshot)
         self.progress_bar.setRange(0, 1000 if percent is not None else 0)
         if percent is not None:
             self.progress_bar.setValue(percent)
@@ -450,16 +464,26 @@ class Window(QMainWindow):
         self.tray.setToolTip('文件夹同步 · ' + title)
         self.activity_panel.overview(percent, title, detail, self.folders.currentText())
 
-    def poll_status(self):
-        try:
+    @Slot(object, object)
+    def progress_ready(self, snapshot, error):
+        self.progress_worker = None
+        if self.exiting:
+            return
+        if self.progress_context != (self.api, self.folders.currentData(), self.progress_display):
             self.refresh_status()
-        except Exception:
+            return
+        if error:
             self.progress_bar.setRange(0, 1000)
             self.progress_bar.setValue(0)
             self.progress_bar.setFormat('状态暂时不可用')
             self.progress_detail.setText('暂时无法读取同步进度')
             self.status.setText('暂时无法读取状态，请检查引擎是否运行。')
             self.activity_panel.overview(0, '状态暂时不可用', '请检查同步引擎连接', self.folders.currentText())
+        else:
+            self.display_progress(snapshot)
+
+    def poll_status(self):
+        self.refresh_status()
         if self.activity_panel.isVisible():
             self.refresh_activity()
 
@@ -471,7 +495,8 @@ class Window(QMainWindow):
             QMessageBox.warning(self, '操作未完成', str(error))
 
     def connect_engine(self):
-        api = Syncthing(self.endpoint.text().strip(), self.key.text().strip())
+        credentials = (self.endpoint.text().strip(), self.key.text().strip())
+        api = Syncthing(*credentials)
         try:
             rows = api.folders()
         except Exception:
@@ -480,17 +505,22 @@ class Window(QMainWindow):
         if self.api:
             self.api.close()
         self.api = api
+        self.engine_credentials = credentials
         self.folders.blockSignals(True)
         self.folders.clear()
         for row in rows:
             self.folders.addItem(row.get('label') or row['id'], row['id'])
         self.folders.blockSignals(False)
-        self.load_folder()
-        if self.overlay_enabled.isChecked():
-            self.change_overlays(True)
+        try:
+            self.load_folder()
+        finally:
+            if self.overlay_enabled.isChecked():
+                self.change_overlays(True)
 
     def load_folder(self):
         self.tree.clear()
+        self.incomplete_directories.clear()
+        self.update_directory_notice()
         self.progress_display = ProgressDisplay()
         self.progress_bar.setValue(0)
         self.progress_bar.setFormat('正在读取进度…')
@@ -510,6 +540,12 @@ class Window(QMainWindow):
         self.status.setText('已恢复目录选择，现有排除规则会保留。保存后可点击“继续同步”。')
         self.refresh_status()
 
+    def update_directory_notice(self):
+        message = ('NAS 目录清单不完整，当前有目录只显示本机索引。可重新展开相应目录，'
+                   '或在设置中重新连接以重读根目录。')
+        self.directory_notice.setText(message if self.incomplete_directories else '')
+        self.directory_notice.setVisible(bool(self.incomplete_directories))
+
     def selection_rows(self, folder, prefix, *, directories_only=True):
         local_error = None
         try:
@@ -521,6 +557,7 @@ class Window(QMainWindow):
 
         nas_rows = []
         endpoint, key = self.nas_endpoint.text().strip(), self.nas_key.text().strip()
+        nas_read = False
         if endpoint and key:
             try:
                 task = next((row for row in self.api.folders() if row['id'] == folder), None)
@@ -531,9 +568,19 @@ class Window(QMainWindow):
                         identity = nas.request('GET', '/rest/system/status').get('myID')
                         if identity in peers:
                             nas_rows = nas.browse(folder, prefix, directories_only=directories_only)
+                            nas_read = True
                             local_error = None
             except (SyncthingError, ValueError) as error:
                 report_exception('browse_nas_selection', error)
+        incomplete = bool(endpoint or key) and not nas_read
+        if directories_only:
+            if incomplete:
+                self.incomplete_directories.add(prefix)
+            else:
+                self.incomplete_directories.discard(prefix)
+            self.update_directory_notice()
+        elif incomplete:
+            raise SyncthingError('NAS 直属文件清单未能核对，请检查 NAS 连接后再保存选择。')
         if local_error is not None:
             raise local_error
 
@@ -545,6 +592,8 @@ class Window(QMainWindow):
         rows = self.selection_rows(self.folders.currentData(), prefix)
         self.updating = True
         try:
+            if parent is not None:
+                parent.takeChildren()
             for row in rows:
                 if row.get('type') != 'FILE_INFO_TYPE_DIRECTORY':
                     continue
@@ -580,7 +629,8 @@ class Window(QMainWindow):
                       item.checkState(0) == Qt.CheckState.Checked)
         self.updating = True
         try:
-            item.setData(0, Qt.ItemDataRole.UserRole + 1, True)
+            item.setData(0, Qt.ItemDataRole.UserRole + 1,
+                         item.data(0, Qt.ItemDataRole.UserRole) not in self.incomplete_directories)
         finally:
             self.updating = False
 

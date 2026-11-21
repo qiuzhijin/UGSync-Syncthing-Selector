@@ -20,7 +20,8 @@ class ProgressDisplay:
             self.previous = None
             return 0, '已暂停', '点击“继续同步”恢复任务'
         local = snapshot['local']
-        peers = snapshot['peers']
+        peers = [peer for peer in snapshot['peers'] if peer.get('connected')]
+        offline = len(snapshot['peers']) - len(peers)
         total = snapshot.get('traffic', {})
         now = self.clock()
         counters = (total.get('inBytesTotal', 0), total.get('outBytesTotal', 0))
@@ -42,17 +43,21 @@ class ProgressDisplay:
         uploading = bool(waiting or outgoing)
         detail = '本机待下载 %s 项 / %s · 对端待接收 %s 项 / %s\n%s' % (
             local.get('needFiles', 0), size_text(need), waiting, size_text(outgoing), speed)
+        if offline:
+            detail += f' · 离线 {offline} 台'
         if local.get('state') == 'error' or local.get('folderErrors'):
             return None, '同步出错，请检查引擎错误列表', detail
         if local.get('state', '').startswith('scan'):
             return None, '正在扫描文件…', detail
-        if not peers or any(not p.get('connected') for p in peers):
+        if not peers:
             return None, '等待设备连接（部分设备可能离线）', detail
         if metadata_pending or any(p.get('remoteState') != 'valid' for p in peers):
             return None, '正在核对文件索引…', detail
         percent = min([local_percent] + [max(0, min(100, p.get('completion', 0))) for p in peers])
         pending = local.get('needTotalItems', local.get('needFiles', 0)) or waiting or outgoing
         if percent >= 100 and not pending and local.get('state') == 'idle':
+            if offline:
+                return 1000, '已连接设备已同步 · 部分设备离线', detail
             return 1000, '已同步 · 两端完成 100%', detail
         percent = min(percent, 99.9)
         if uploading and downloading:

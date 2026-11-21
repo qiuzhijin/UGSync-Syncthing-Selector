@@ -74,7 +74,7 @@ def _pending_entries(api, route, params, sections, count):
     return None
 
 
-def _pending_for_partial_folders(api, folder, peers):
+def _pending_for_directories(api, folder, peers):
     status = api.status(folder)
     if status.get('state') not in ('idle', 'syncing') or status.get('errors') or status.get('pullErrors'):
         return None
@@ -244,13 +244,13 @@ class OverlayPublisher:
                         paths += (known + known)[index:index + 16]
                         index = (index + 16) % len(known)
                     changed_directories = set()
-                    partial_pending = {}
+                    pending_by_folder = {}
                     for path in dict.fromkeys(paths):
                         if self.stop_event.is_set():
                             break
                         try:
                             changed = self.inspect(api, folders, connections, identity, path,
-                                                   requested=path in requested, partial_pending=partial_pending)
+                                                   requested=path in requested, pending_by_folder=pending_by_folder)
                             if changed:
                                 changed_directories.add(os.path.dirname(path))
                         except Exception:
@@ -265,7 +265,7 @@ class OverlayPublisher:
         finally:
             api.close()
 
-    def inspect(self, api, folders, connections, identity, path, *, requested=False, partial_pending=None):
+    def inspect(self, api, folders, connections, identity, path, *, requested=False, pending_by_folder=None):
         path = os.path.abspath(path)
         matches = []
         for folder in folders:
@@ -294,41 +294,20 @@ class OverlayPublisher:
                 if not known:
                     return
                 state = 'R'
-            elif rules is not None and os.path.isdir(path) and selection_partial(relative, rules):
-                state = 'B'
+            elif os.path.isdir(path):
+                partial = rules is not None and selection_partial(relative, rules)
+                state = 'B' if partial else None
                 if peers and all(connections.get(p, {}).get('connected') for p in peers):
-                    if partial_pending is None:
-                        partial_pending = {}
-                    if folder['id'] not in partial_pending:
-                        partial_pending[folder['id']] = None
-                        try:
-                            partial_pending[folder['id']] = _pending_for_partial_folders(api, folder['id'], peers)
-                        except SyncthingError:
-                            pass
-                    pending = partial_pending[folder['id']]
-                    if pending is not None:
-                        downloads, uploads = pending
-                        prefix = '' if relative == '.' else relative.casefold() + '/'
-                        if not (any(name.startswith(prefix) for name, _ in downloads) or
-                                any(name.startswith(prefix) and not selection_excludes(name, rules, directory=directory)
-                                    for name, directory in uploads)):
-                            state = 'G'
+                    local = None
+                    if not partial and relative != '.':
+                        info = api.request('GET', '/rest/db/file', params={'folder': folder['id'], 'file': relative})
+                        local = info.get('local') or {}
+                    if local and local.get('ignored'):
+                        state = 'R'
+                    elif local is None or (local.get('name') and not local.get('deleted') and not local.get('invalid')):
+                        state = self.directory_state(api, folder['id'], peers, relative, rules, pending_by_folder)
             elif not peers or any(not connections.get(p, {}).get('connected') for p in peers):
                 state = None
-            elif os.path.isdir(path):
-                # Folder green is deliberately limited to a fully converged task.
-                info = api.request('GET', '/rest/db/file', params={'folder': folder['id'], 'file': relative}) if relative != '.' else None
-                if info and (info.get('local') or {}).get('ignored'):
-                    state = 'R'
-                elif info and not info.get('local'):
-                    state = None
-                else:
-                    status = api.status(folder['id'])
-                    complete = status.get('state') == 'idle' and not status.get('needTotalItems') and not status.get('errors') and not status.get('pullErrors')
-                    for peer in peers:
-                        remote = api.request('GET', '/rest/db/completion', params={'folder': folder['id'], 'device': peer})
-                        complete &= remote.get('completion') == 100 and remote.get('remoteState') == 'valid'
-                    state = 'G' if complete else 'B'
             else:
                 info = api.request('GET', '/rest/db/file', params={'folder': folder['id'], 'file': relative})
                 state = file_state(info, peers, before.st_size, before.st_mtime)
@@ -351,3 +330,24 @@ class OverlayPublisher:
                 return True
         except OSError:
             self.invalidate(path)
+
+    def directory_state(self, api, folder, peers, relative, rules, pending_by_folder):
+        if pending_by_folder is None:
+            pending_by_folder = {}
+        if folder not in pending_by_folder:
+            pending_by_folder[folder] = None
+            try:
+                pending_by_folder[folder] = _pending_for_directories(api, folder, peers)
+            except SyncthingError:
+                pass
+        pending = pending_by_folder[folder]
+        if pending is None:
+            return 'B'
+        path = '' if relative == '.' else relative.casefold()
+        prefix = path + '/' if path else ''
+        downloads, uploads = pending
+        waiting = any(name == path or name.startswith(prefix) for name, _ in downloads)
+        waiting |= any((name == path or name.startswith(prefix)) and
+                       (rules is None or not selection_excludes(name, rules, directory=directory))
+                       for name, directory in uploads)
+        return 'B' if waiting else 'G'

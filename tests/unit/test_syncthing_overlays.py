@@ -65,6 +65,7 @@ def test_existing_deselected_file_and_directory_publish_red_without_peer(tmp_pat
     ([], [], 0, 'G'),
     (['Elsewhere/file.txt'], ['Work/Skipped/file.txt', 'Workshop/file.txt'], 1, 'G'),
     (['Work/Keep/file.txt'], [], 1, 'B'),
+    (['Work'], [], 1, 'B'),
     (['Work/direct.txt'], [], 1, 'B'),
     ([], ['Work/direct.txt'], 0, 'B'),
     ([], ['Work/Keep/file.txt'], 0, 'B'),
@@ -84,6 +85,8 @@ def test_partial_parent_state_uses_only_selected_content(tmp_path, downloads, up
             return {'state': 'syncing' if reported else 'idle', 'needTotalItems': reported}
 
         def request(self, method, route, **kwargs):
+            if route == '/rest/db/file':
+                return {'local': {'name': 'Work'}}
             if route == '/rest/db/need':
                 params = kwargs['params']
                 size = params['perpage']
@@ -104,6 +107,10 @@ def test_partial_parent_state_uses_only_selected_content(tmp_path, downloads, up
               '_overlay_selection': compile_document([], ['Work/Keep'], direct_files=['Work/direct.txt'])}
     publisher.inspect(Api(), [folder], {'nas': {'connected': True}}, 'pc', str(parent))
     assert publisher.records[str(parent)][0] == expected
+
+    folder['_overlay_selection'] = compile_document([], ['Work'], direct_files=[])
+    publisher.inspect(Api(), [folder], {'nas': {'connected': True}}, 'pc', str(parent))
+    assert publisher.records[str(parent)][0] == ('B' if 'Work/Skipped/file.txt' in uploads else expected)
 
 
 def test_green_requires_matching_version_and_full_remote_copy():

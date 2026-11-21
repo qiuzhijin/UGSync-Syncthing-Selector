@@ -46,6 +46,14 @@ def test_both_sides_complete():
     assert ProgressDisplay().update(value)[0] == 1000
 
 
+def test_offline_peer_does_not_hide_connected_peer_progress():
+    value = snapshot()
+    value['peers'].append({'connected': False})
+    percent, title, detail = ProgressDisplay().update(value)
+    assert percent == 600 and '正在上传和下载' in title
+    assert '离线 1 台' in detail
+
+
 def test_scan_offline_and_pause_are_not_false_completion():
     display = ProgressDisplay()
     value = snapshot()

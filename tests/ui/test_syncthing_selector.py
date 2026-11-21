@@ -142,7 +142,9 @@ def test_saving_child_selection_includes_local_and_global_direct_files(monkeypat
         window.close()
 
 
-@pytest.mark.parametrize('identity,expected', [('nas', ['AI', '申请专利']), ('other', ['申请专利'])])
+@pytest.mark.parametrize('identity,expected', [
+    ('nas', ['AI', '申请专利']), ('other', ['申请专利']), ('timeout', ['申请专利']),
+])
 def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, identity, expected):
     import syncthing_bridge.__main__ as ui
 
@@ -165,6 +167,8 @@ def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, i
             self.http = SimpleNamespace(timeout=None)
 
         def request(self, method, route):
+            if identity == 'timeout':
+                raise ui.SyncthingTimeout('NAS timeout')
             return {'myID': identity}
 
         def browse(self, folder, prefix, *, directories_only=True):
@@ -181,6 +185,10 @@ def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, i
     try:
         rows = window.selection_rows('test', '学习')
         assert [row['name'] for row in rows] == expected
+        assert ('不完整' in window.directory_notice.text()) == (identity != 'nas')
+        if identity != 'nas':
+            with pytest.raises(ui.SyncthingError, match='直属文件清单'):
+                window.selection_rows('test', '学习', directories_only=False)
     finally:
         window.exiting = True
         window.close()
@@ -315,12 +323,53 @@ def test_progress_bar_shows_upload_still_pending():
     window.folders.blockSignals(True)
     window.folders.addItem('测试', 'test')
     window.folders.blockSignals(False)
-    window.refresh_status()
+    window.display_progress(window.api.progress_snapshot('test'))
     assert window.progress_bar.value() == 600
     assert '60.0%' in window.status.text()
     assert '对端待接收 2 项' in window.progress_detail.text()
     window.exiting = True
     window.close()
+
+
+def test_progress_refresh_keeps_ui_responsive_and_coalesces_requests(monkeypatch):
+    from threading import Event, get_ident
+    from PySide6.QtCore import QEventLoop, QTimer
+    import syncthing_bridge.activity as activity_module
+
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    window.timer.stop()
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    window.api = SimpleNamespace(close=lambda: None)
+    window.engine_credentials = ('http://127.0.0.1:8384', 'test')
+    loop = QEventLoop()
+    release = Event()
+    worker_threads = []
+    snapshots = []
+
+    def snapshot(folder):
+        worker_threads.append(get_ident())
+        if not release.wait(2):
+            raise TimeoutError()
+        return {'paused': True}
+
+    monkeypatch.setattr(activity_module, 'Syncthing', lambda *args: SimpleNamespace(
+        http=SimpleNamespace(), progress_snapshot=snapshot, close=lambda: None))
+    monkeypatch.setattr(window, 'display_progress', lambda value: (snapshots.append(value), loop.quit()))
+    try:
+        window.refresh_status()
+        window.refresh_status()
+        QTimer.singleShot(0, release.set)
+        QTimer.singleShot(2500, loop.quit)
+        loop.exec()
+        assert snapshots == [{'paused': True}]
+        assert len(worker_threads) == 1 and worker_threads[0] != get_ident()
+    finally:
+        release.set()
+        window.exiting = True
+        window.close()
 
 
 def test_enabling_overlays_installs_extension_before_starting_publisher(monkeypatch):
@@ -352,7 +401,8 @@ def test_enabling_overlays_installs_extension_before_starting_publisher(monkeypa
 
 
 @pytest.mark.parametrize('installed', [False, True])
-def test_connect_engine_restores_overlays_without_installing(monkeypatch, installed):
+@pytest.mark.parametrize('browse_fails', [False, True])
+def test_connect_engine_restores_overlays_without_installing(monkeypatch, installed, browse_fails):
     import syncthing_bridge.__main__ as ui
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, 'QSettings', lambda *args: SimpleNamespace(
@@ -367,7 +417,14 @@ def test_connect_engine_restores_overlays_without_installing(monkeypatch, instal
     monkeypatch.setattr(ui, 'OverlayPublisher', lambda *args: SimpleNamespace(
         start=lambda: calls.append('start'), stop=lambda **kwargs: None))
     try:
-        window.connect_engine()
+        if browse_fails:
+            def fail():
+                raise ui.SyncthingError('目录不可用')
+            monkeypatch.setattr(window, 'load_folder', fail)
+            with pytest.raises(ui.SyncthingError):
+                window.connect_engine()
+        else:
+            window.connect_engine()
         assert calls == (['start'] if installed else [])
         assert window.overlay_enabled.isChecked()
         assert ('重新勾选' in window.overlay_notice.text()) is not installed
@@ -406,7 +463,8 @@ def test_selector_restores_saved_nas_connection(monkeypatch):
     window.close()
 
 
-def test_activity_reader_merges_nas_download_rows(monkeypatch):
+@pytest.mark.parametrize('nas_identity', ['nas', 'other'])
+def test_activity_reader_merges_only_verified_nas_download_rows(monkeypatch, nas_identity):
     import syncthing_bridge.activity as activity_module
 
     class Engine:
@@ -416,7 +474,13 @@ def test_activity_reader_merges_nas_download_rows(monkeypatch):
         def activity(self, folder, **kwargs):
             return {'current': [], 'queue': [], 'recent': [], 'notices': [], 'tracked': [],
                     'uploads': [], 'page': 1, 'has_more': False}
+        def folders(self):
+            return [{'id': 'drive', 'devices': [{'deviceID': 'local'}, {'deviceID': 'nas'}]}]
+        def request(self, method, route):
+            assert route == '/rest/system/status'
+            return {'myID': nas_identity if self.endpoint == 'http://nas.invalid:8384' else 'local'}
         def download_activity(self, folder, **kwargs):
+            assert nas_identity == 'nas'
             assert self.endpoint == 'http://nas.invalid:8384'
             return {'current': [{'name': 'nas-live.txt', 'status': 'NAS 正在下载'}],
                     'queue': [{'name': 'nas-wait.txt', 'status': 'NAS 等待下载'}], 'has_more': True}
@@ -431,6 +495,10 @@ def test_activity_reader_merges_nas_download_rows(monkeypatch):
     worker.run()
     result, error = received[0]
     assert error is None
+    if nas_identity != 'nas':
+        assert not result['current'] and not result['queue']
+        assert result['queue_incomplete']
+        return
     assert result['current'][0]['name'] == 'nas-live.txt'
     assert result['queue'][0]['name'] == 'nas-wait.txt'
     assert result['has_more']
