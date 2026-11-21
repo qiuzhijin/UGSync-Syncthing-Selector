@@ -343,10 +343,37 @@ def test_enabling_overlays_installs_extension_before_starting_publisher(monkeypa
     monkeypatch.setattr(ui.sys, 'platform', 'win32')
     window.api = SimpleNamespace(close=lambda: None)
     window.key.setText('local-key')
-    window.change_overlays(True)
+    window.overlay_preferences = SimpleNamespace(setValue=lambda *args: None)
+    window.overlay_enabled.setChecked(False)
+    window.overlay_enabled.setChecked(True)
     assert calls == ['install', ('publisher', 'http://127.0.0.1:8384', 'local-key'), 'start']
     window.exiting = True
     window.close()
+
+
+@pytest.mark.parametrize('installed', [False, True])
+def test_connect_engine_restores_overlays_without_installing(monkeypatch, installed):
+    import syncthing_bridge.__main__ as ui
+    app = QApplication.instance() or QApplication([])
+    monkeypatch.setattr(ui, 'QSettings', lambda *args: SimpleNamespace(
+        value=lambda key, default=None, **kwargs: key == 'enabled' or default,
+        setValue=lambda *args: None))
+    window = Window()
+    calls = []
+    monkeypatch.setattr(ui.sys, 'platform', 'win32')
+    monkeypatch.setattr(ui, 'Syncthing', lambda *args: SimpleNamespace(folders=list, close=lambda: None))
+    monkeypatch.setattr(ui, 'overlay_extension_installed', lambda: installed)
+    monkeypatch.setattr(ui, 'install_overlay_extension', lambda: calls.append('install') or True)
+    monkeypatch.setattr(ui, 'OverlayPublisher', lambda *args: SimpleNamespace(
+        start=lambda: calls.append('start'), stop=lambda **kwargs: None))
+    try:
+        window.connect_engine()
+        assert calls == (['start'] if installed else [])
+        assert window.overlay_enabled.isChecked()
+        assert ('重新勾选' in window.overlay_notice.text()) is not installed
+    finally:
+        window.exiting = True
+        window.close()
 
 
 def test_selector_restores_saved_nas_connection(monkeypatch):

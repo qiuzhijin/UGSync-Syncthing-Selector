@@ -117,8 +117,12 @@ class Window(QMainWindow):
         preferences_layout.addWidget(self.autostart)
         self.overlay_enabled = QCheckBox('资源管理器同步角标（首次启用会请求管理员权限安装）')
         self.overlay_enabled.setChecked(self.overlay_preferences.value('enabled', False, type=bool))
-        self.overlay_enabled.toggled.connect(self.change_overlays)
+        self.overlay_enabled.toggled.connect(lambda enabled: self.change_overlays(enabled, allow_install=True))
         preferences_layout.addWidget(self.overlay_enabled)
+        self.overlay_notice = QLabel()
+        self.overlay_notice.setWordWrap(True)
+        self.overlay_notice.hide()
+        preferences_layout.addWidget(self.overlay_notice)
         settings_layout.addWidget(preferences)
         settings_layout.addStretch()
         layout = QVBoxLayout(directory_page)
@@ -282,38 +286,56 @@ class Window(QMainWindow):
         self.raise_()
         self.activateWindow()
 
-    def change_overlays(self, enabled):
+    def change_overlays(self, enabled, *, allow_install=False):
         if self.overlay_publisher:
             self.overlay_publisher.stop()
             self.overlay_publisher = None
+        self.overlay_notice.hide()
         if not enabled:
             self.overlay_preferences.setValue('enabled', False)
             return
-        if not self.api or sys.platform != 'win32':
-            self.overlay_preferences.setValue('enabled', True)
+        if sys.platform != 'win32':
             return
         from urllib.parse import urlsplit
-        if urlsplit(self.endpoint.text()).hostname not in ('127.0.0.1', 'localhost', '::1'):
-            self.disable_overlays('资源管理器角标仅支持本机 Syncthing。')
+        endpoint = self.endpoint.text().strip()
+        if urlsplit(endpoint).hostname not in ('127.0.0.1', 'localhost', '::1'):
+            message = '资源管理器角标仅支持本机 Syncthing。'
+            if allow_install:
+                self.disable_overlays(message)
+            else:
+                self.show_overlay_notice(message)
             return
-        try:
-            if not overlay_extension_installed() and not install_overlay_extension():
-                raise OverlayInstallError('角标扩展未安装。')
-        except OverlayInstallError as error:
-            report_exception('install_explorer_overlay', error)
-            self.disable_overlays(str(error))
+        if not overlay_extension_installed():
+            if not allow_install:
+                self.show_overlay_notice('角标扩展未安装或注册不完整。请取消勾选后重新勾选以安装。')
+                return
+            try:
+                if not install_overlay_extension():
+                    raise OverlayInstallError('角标扩展未安装。')
+            except OverlayInstallError as error:
+                report_exception('install_explorer_overlay', error)
+                self.disable_overlays(str(error))
+                return
+        if allow_install:
+            self.overlay_preferences.setValue('enabled', True)
+        if not self.api:
+            self.show_overlay_notice('角标扩展已安装，连接本机 Syncthing 后会显示同步状态。')
             return
-        self.overlay_preferences.setValue('enabled', True)
-        self.overlay_publisher = OverlayPublisher(self.endpoint.text().strip(), self.key.text().strip())
+        self.overlay_publisher = OverlayPublisher(endpoint, self.key.text().strip())
         self.overlay_publisher.start()
-        self.status.setText('资源管理器同步角标已启用；若仍未显示，请注销 Windows 后重新登录。')
+        if allow_install:
+            self.show_overlay_notice('资源管理器同步角标已启用。若仍未显示，请注销 Windows 后重新登录。')
+
+    def show_overlay_notice(self, message):
+        self.overlay_notice.setText(message)
+        self.overlay_notice.show()
 
     def disable_overlays(self, message):
         self.overlay_preferences.setValue('enabled', False)
         self.overlay_enabled.blockSignals(True)
         self.overlay_enabled.setChecked(False)
         self.overlay_enabled.blockSignals(False)
-        self.status.setText(message)
+        self.show_overlay_notice(message)
 
     def quit_interface(self):
         self.exiting = True

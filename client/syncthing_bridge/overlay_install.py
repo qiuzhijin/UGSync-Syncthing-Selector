@@ -57,14 +57,15 @@ def install_overlay_extension():
     arguments = subprocess.list2cmdline(['-NoProfile', '-ExecutionPolicy', 'Bypass',
                                          '-File', str(script), '-Action', 'Install'])
     escaped = arguments.replace("'", "''")
-    command = ("$process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -Wait -PassThru "
+    command = ("$process = Start-Process -FilePath 'powershell.exe' -Verb RunAs -WindowStyle Hidden -Wait -PassThru "
                f"-ArgumentList '{escaped}' -ErrorAction Stop; exit $process.ExitCode")
     encoded = base64.b64encode(command.encode('utf-16-le')).decode('ascii')
     try:
         result = subprocess.run(['powershell.exe', '-NoProfile', '-ExecutionPolicy', 'Bypass',
                                  '-EncodedCommand', encoded], check=False,
                                 stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
-                                stderr=subprocess.DEVNULL, timeout=90)
+                                stderr=subprocess.DEVNULL, timeout=90,
+                                creationflags=subprocess.CREATE_NO_WINDOW)
     except (OSError, subprocess.TimeoutExpired):
         raise OverlayInstallError('无法启动角标安装程序。') from None
     if result.returncode != 0 or not overlay_extension_installed():

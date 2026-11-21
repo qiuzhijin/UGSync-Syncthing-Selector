@@ -25,7 +25,9 @@ def test_overlay_install_quotes_script_path_with_spaces(monkeypatch, tmp_path):
     monkeypatch.setattr(overlay_install, 'overlay_extension_installed', lambda: next(installed))
 
     def launch(args, **kwargs):
+        assert kwargs['creationflags'] == overlay_install.subprocess.CREATE_NO_WINDOW
         command = base64.b64decode(args[-1]).decode('utf-16-le')
+        assert '-WindowStyle Hidden' in command
         script = str(payload / 'install_overlays.ps1').replace("'", "''")
         assert f'-File "{script}" -Action Install' in command
         return SimpleNamespace(returncode=0)
