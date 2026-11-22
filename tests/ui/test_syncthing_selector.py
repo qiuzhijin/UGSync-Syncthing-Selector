@@ -147,10 +147,13 @@ def test_saving_child_selection_includes_local_and_global_direct_files(monkeypat
 ])
 def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, identity, expected):
     import syncthing_bridge.__main__ as ui
+    import syncthing_bridge.activity as activity_module
+    from PySide6.QtTest import QTest
 
     app = QApplication.instance() or QApplication([])
     window = Window()
     directory = 'FILE_INFO_TYPE_DIRECTORY'
+    attempts = []
 
     class Local:
         def folders(self):
@@ -173,22 +176,75 @@ def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, i
 
         def browse(self, folder, prefix, *, directories_only=True):
             assert prefix == '学习'
+            attempts.append(prefix)
+            if len(attempts) == 1:
+                raise ui.SyncthingTimeout('first browse timed out')
             return [{'name': 'AI', 'type': directory}, {'name': '申请专利', 'type': directory}]
 
         def close(self):
             pass
 
     window.api = Local()
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
     window.nas_endpoint.setText('http://nas.invalid:8384')
     window.nas_key.setText('test-key')
-    monkeypatch.setattr(ui, 'Syncthing', Nas)
+    monkeypatch.setattr(activity_module, 'Syncthing', Nas)
+    errors = []
+    monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *args: errors.append(args[-1]))
     try:
-        rows = window.selection_rows('test', '学习')
-        assert [row['name'] for row in rows] == expected
+        window.populate(None, '学习', False)
+        assert window.loading_directories == {'学习'}
+        for _ in range(100):
+            if not window.nas_directory_jobs:
+                break
+            QTest.qWait(10)
+        assert not window.nas_directory_jobs and not errors
+        assert len(attempts) == (2 if identity == 'nas' else 0)
+        assert [window.tree.topLevelItem(i).text(0) for i in range(window.tree.topLevelItemCount())] == expected
         assert ('不完整' in window.directory_notice.text()) == (identity != 'nas')
         if identity != 'nas':
             with pytest.raises(ui.SyncthingError, match='直属文件清单'):
                 window.selection_rows('test', '学习', directories_only=False)
+    finally:
+        window.exiting = True
+        window.close()
+
+
+def test_preview_nas_timeout_keeps_selection_and_ignores_stale_results(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    callbacks = []
+    notices = []
+    monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *args: notices.append(args[-1]))
+    monkeypatch.setattr(window, 'read_nas_directories',
+                        lambda folder, parents, callback, **kwargs: callbacks.append(callback) or True)
+    previews = []
+    monkeypatch.setattr(window, 'show_selection_preview', lambda *args: previews.append(args))
+    window.api = SimpleNamespace(close=lambda: None)
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    window.populate_rows(None, '', [{'name': 'Work', 'type': 'FILE_INFO_TYPE_DIRECTORY'}])
+    window.choices = {'Work/Keep': True}
+    try:
+        window.preview()
+        assert not window.preview_button.isEnabled()
+        worker = object()
+        window.nas_directory_jobs[worker] = (
+            window.progress_display, window.nas_directory_credentials(), callbacks.pop())
+        window.nas_directories_ready(worker, (None, ui.SyncthingTimeout('timeout')))
+        assert window.preview_button.isEnabled() and '勾选已保留' in notices[-1]
+        assert window.choices == {'Work/Keep': True} and not previews
+
+        window.preview()
+        window.nas_directory_jobs[worker] = (
+            window.progress_display, window.nas_directory_credentials(), callbacks.pop())
+        window.progress_display = ui.ProgressDisplay()
+        window.nas_directories_ready(worker, ({'Work': []}, None))
+        assert not previews
     finally:
         window.exiting = True
         window.close()

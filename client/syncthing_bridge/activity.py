@@ -7,12 +7,44 @@ from PySide6.QtCore import QObject, QRunnable, Qt, Signal
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
     QProgressBar, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
-from syncthing_bridge.api import Syncthing
+from syncthing_bridge.api import Syncthing, SyncthingError, SyncthingTimeout
 from syncthing_bridge.diagnostics import report_exception
 
 
 class Result(QObject):
     ready = Signal(object, object)
+
+
+class ReadNasDirectories(QRunnable):
+    def __init__(self, endpoint, key, folder, peers, prefixes, *, directories_only):
+        super().__init__()
+        self.endpoint, self.key, self.folder = endpoint, key, folder
+        self.peers, self.prefixes = peers, prefixes
+        self.directories_only = directories_only
+        self.signals = Result()
+
+    @staticmethod
+    def retry_timeout(read, *args, **kwargs):
+        try:
+            return read(*args, **kwargs)
+        except SyncthingTimeout:
+            return read(*args, **kwargs)
+
+    def run(self):
+        try:
+            with closing(Syncthing(self.endpoint, self.key)) as nas:
+                nas.http.timeout = httpx.Timeout(10, connect=4)
+                identity = self.retry_timeout(nas.request, 'GET', '/rest/system/status')
+                if not identity or identity.get('myID') not in self.peers:
+                    raise SyncthingError('NAS 设备与此同步任务不匹配')
+                rows = {prefix: self.retry_timeout(
+                    nas.browse, self.folder, prefix, directories_only=self.directories_only)
+                    for prefix in self.prefixes}
+        except Exception as error:
+            report_exception('browse_nas_selection', error)
+            self.signals.ready.emit(self, (None, error))
+        else:
+            self.signals.ready.emit(self, (rows, None))
 
 
 class ReadProgress(QRunnable):
