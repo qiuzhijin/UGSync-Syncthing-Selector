@@ -204,16 +204,17 @@ def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, i
         assert len(attempts) == (2 if identity == 'nas' else 0)
         assert [window.tree.topLevelItem(i).text(0) for i in range(window.tree.topLevelItemCount())] == expected
         assert ('不完整' in window.directory_notice.text()) == (identity != 'nas')
-        if identity != 'nas':
-            with pytest.raises(ui.SyncthingError, match='直属文件清单'):
-                window.selection_rows('test', '学习', directories_only=False)
     finally:
         window.exiting = True
         window.close()
 
 
-def test_preview_nas_timeout_keeps_selection_and_ignores_stale_results(monkeypatch):
+@pytest.mark.parametrize('local_available', [True, False])
+def test_preview_nas_timeout_uses_local_index_and_preserves_saved_files(monkeypatch, tmp_path, local_available):
     import syncthing_bridge.__main__ as ui
+    from PySide6.QtWidgets import QLabel
+    from syncthing_bridge.selection import compile_document
+
     app = QApplication.instance() or QApplication([])
     window = Window()
     callbacks = []
@@ -221,9 +222,27 @@ def test_preview_nas_timeout_keeps_selection_and_ignores_stale_results(monkeypat
     monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *args: notices.append(args[-1]))
     monkeypatch.setattr(window, 'read_nas_directories',
                         lambda folder, parents, callback, **kwargs: callbacks.append(callback) or True)
+    saved = []
     previews = []
-    monkeypatch.setattr(window, 'show_selection_preview', lambda *args: previews.append(args))
-    window.api = SimpleNamespace(close=lambda: None)
+
+    def accept(dialog):
+        previews.append([label.text() for label in dialog.findChildren(QLabel)])
+        return QDialog.DialogCode.Accepted
+
+    monkeypatch.setattr(QDialog, 'exec', accept)
+    def browse(folder, prefix, **kwargs):
+        if not local_available:
+            raise ui.SyncthingTimeout('timeout')
+        return [{'name': 'indexed.txt', 'type': 'FILE_INFO_TYPE_FILE'}] if prefix == 'Work' else []
+
+    window.api = SimpleNamespace(
+        close=lambda: None, folders=lambda: [{'id': 'test', 'path': str(tmp_path)}], browse=browse,
+        save_selection=lambda folder, rules, previous: saved.extend(rules))
+    window.nas_endpoint.setText('https://nas.invalid')
+    window.nas_key.setText('test-key')
+    window.escape = '|'
+    window.previous = compile_document([], ['Work/Keep', 'Old/Keep'], direct_files=[
+        'Work/saved[1].txt', 'Old/obsolete.txt'])
     window.folders.blockSignals(True)
     window.folders.addItem('测试', 'test')
     window.folders.blockSignals(False)
@@ -236,15 +255,24 @@ def test_preview_nas_timeout_keeps_selection_and_ignores_stale_results(monkeypat
         window.nas_directory_jobs[worker] = (
             window.progress_display, window.nas_directory_credentials(), callbacks.pop())
         window.nas_directories_ready(worker, (None, ui.SyncthingTimeout('timeout')))
-        assert window.preview_button.isEnabled() and '勾选已保留' in notices[-1]
-        assert window.choices == {'Work/Keep': True} and not previews
+        assert window.preview_button.isEnabled()
+        assert window.choices == {'Work/Keep': True}
+        if not local_available:
+            assert not previews and not saved
+            assert '本机目录也无法读取' in notices[-1]
+            return
+        assert not notices
+        assert len(previews) == 1 and any('未能核对 NAS 清单' in label for label in previews[0])
+        assert '!/Work/indexed.txt' in saved
+        assert '!/Work/saved|[1|].txt' in saved
+        assert '!/Old/obsolete.txt' not in saved
 
         window.preview()
         window.nas_directory_jobs[worker] = (
             window.progress_display, window.nas_directory_credentials(), callbacks.pop())
         window.progress_display = ui.ProgressDisplay()
         window.nas_directories_ready(worker, ({'Work': []}, None))
-        assert not previews
+        assert len(previews) == 1
     finally:
         window.exiting = True
         window.close()

@@ -12,7 +12,7 @@ from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSys
 
 from syncthing_bridge.api import Syncthing, SyncthingError, SyncthingTimeout, local_credentials
 from syncthing_bridge.appearance import apply_appearance
-from syncthing_bridge.selection import normalize, parse_document, compile_document, direct_file_parents
+from syncthing_bridge.selection import normalize, parse_document, compile_document, direct_file_parents, saved_direct_files
 from syncthing_bridge.desktop import startup_enabled, set_startup, engine_available, launch_engine
 from syncthing_bridge.diagnostics import application_log, report_exception
 from syncthing_bridge.instance import SingleInstance
@@ -583,8 +583,6 @@ class Window(QMainWindow):
 
     def selection_rows(self, folder, prefix, *, directories_only=True, nas_rows=None):
         incomplete = any(self.nas_directory_credentials()) and nas_rows is None
-        if not directories_only and incomplete:
-            raise SyncthingError('NAS 直属文件清单未能核对。勾选已保留，请再次点击“预览并保存选择”重试。')
         local_error = None
         try:
             local_rows = self.api.browse(folder, prefix) if directories_only else self.api.browse(
@@ -734,11 +732,8 @@ class Window(QMainWindow):
         folder = self.folders.currentData()
         parents = direct_file_parents(included, excluded, entire)
 
-        def complete(nas, error):
+        def complete(nas, _error):
             self.set_preview_busy(False)
-            if error is not None:
-                reason = '读取超时' if isinstance(error, SyncthingTimeout) else '无法读取'
-                raise SyncthingError(f'NAS 直属文件清单{reason}。勾选已保留，请再次点击“预览并保存选择”重试。')
             if self.choices != choices or self.all.isChecked() != entire:
                 raise SyncthingError('目录勾选已更改，请重新预览。')
             self.show_selection_preview(folder, included, excluded, entire, parents, nas or {})
@@ -750,15 +745,23 @@ class Window(QMainWindow):
 
     def show_selection_preview(self, folder, included, excluded, entire, parents, nas):
         direct_files = []
+        local_only = bool(parents and not nas and any(self.nas_directory_credentials()))
+        prior_files = saved_direct_files(self.previous, self.escape) if local_only else []
         if parents:
             config = next(row for row in self.api.folders() if row['id'] == folder)
             root = Path(os.path.expandvars(config['path'])).expanduser()
             for parent in parents:
                 local = root / parent
-                rows = self.selection_rows(folder, parent, directories_only=False, nas_rows=nas.get(parent))
+                try:
+                    rows = self.selection_rows(folder, parent, directories_only=False, nas_rows=nas.get(parent))
+                except SyncthingError as error:
+                    if local_only:
+                        raise SyncthingError(f'NAS 清单未能核对，本机目录也无法读取：{error}。勾选已保留。') from None
+                    raise
                 directory_names = {row['name'].casefold() for row in rows
                                    if row.get('type') == 'FILE_INFO_TYPE_DIRECTORY'}
                 names = {row['name'] for row in rows if row.get('type') == 'FILE_INFO_TYPE_FILE'}
+                names.update(path.rpartition('/')[2] for path in prior_files if path.rpartition('/')[0] == parent)
                 if local.is_dir() and not local.is_symlink():
                     for entry in local.iterdir():
                         if entry.is_dir():
@@ -776,6 +779,10 @@ class Window(QMainWindow):
         dialog.setWindowTitle('确认选择范围')
         dialog.resize(700, 500)
         layout = QVBoxLayout(dialog)
+        if local_only:
+            notice = QLabel('未能核对 NAS 清单。此预览使用本机索引、磁盘及已保存的直属文件规则。尚未进入本机索引的 NAS 文件可能需要稍后重新核对。')
+            notice.setWordWrap(True)
+            layout.addWidget(notice)
         layout.addWidget(QLabel('保存时自动暂停此任务，再替换本机忽略规则。保存后保持暂停。\n'
                                '父目录新增直属文件后，请重新保存选择以纳入同步。'))
         text = QTextEdit()

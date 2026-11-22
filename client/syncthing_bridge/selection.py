@@ -43,6 +43,24 @@ def direct_file_parents(included, excluded, entire_root):
 DIRECT_FILES_MARKER = '// UGSync direct files'
 
 
+def saved_direct_files(rules, escape):
+    import re
+    if DIRECT_FILES_MARKER not in rules:
+        return []
+    if rules.count(DIRECT_FILES_MARKER) != 2:
+        raise ValueError('直属文件规则标记无效')
+    start = rules.index(DIRECT_FILES_MARKER) + 1
+    block = rules[start:rules.index(DIRECT_FILES_MARKER, start)]
+    if len(block) % 2:
+        raise ValueError('直属文件规则格式无效')
+    files = []
+    for guard, include in zip(block[::2], block[1::2]):
+        if not include.startswith('!/') or guard != include[1:] + '/**':
+            raise ValueError('直属文件规则格式无效')
+        files.append(re.sub(re.escape(escape) + '(.)', r'\1', include[2:]))
+    return files
+
+
 def compile_selection(included=(), excluded=(), *, entire_root=False, escape='\\',
                       direct_files=None, _direct_files=True):
     if type(entire_root) is not bool:
@@ -96,18 +114,12 @@ def parse_selection(rules, escape='\\'):
     body = rules[2:] if entire else rules[2:-1]
     files = None
     if body and body[0] == DIRECT_FILES_MARKER:
-        if body.count(DIRECT_FILES_MARKER) != 2:
+        try:
+            files = saved_direct_files(body, escape)
+        except ValueError:
             return None
         end = body.index(DIRECT_FILES_MARKER, 1)
-        block, body = body[1:end], body[end + 1:]
-        if len(block) % 2:
-            return None
-        import re
-        files = []
-        for guard, include in zip(block[::2], block[1::2]):
-            if not include.startswith('!/') or guard != include[1:] + '/**':
-                return None
-            files.append(re.sub(re.escape(escape) + '(.)', r'\1', include[2:]))
+        body = body[end + 1:]
     choices = {}
     index = 0
     while index < len(body):
