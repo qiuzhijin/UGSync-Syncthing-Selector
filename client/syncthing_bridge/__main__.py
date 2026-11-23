@@ -187,7 +187,11 @@ class Window(QMainWindow):
         self.overlay_notice.setWordWrap(True)
         self.overlay_notice.hide()
         preferences_layout.addWidget(self.overlay_notice)
-        settings_layout.addWidget(preferences)
+        if sys.platform == 'win32':
+            settings_layout.addWidget(preferences)
+        else:
+            preferences.setParent(settings_page)
+            preferences.hide()
         settings_layout.addStretch()
         layout = QVBoxLayout(directory_page)
         layout.setContentsMargins(0, 6, 0, 0)
@@ -240,6 +244,10 @@ class Window(QMainWindow):
         refresh.clicked.connect(self.refresh_status)
         for button in (pause, resume, refresh):
             row.addWidget(button)
+        if sys.platform != 'win32':
+            activity = QPushButton('同步动态')
+            activity.clicked.connect(self.show_activity)
+            row.addWidget(activity)
         layout.addLayout(row)
         self.status = QLabel('正在连接本机 Syncthing。连接失败时，可在「设置」页调整连接。')
         self.status.setProperty('role', 'muted')
@@ -364,7 +372,8 @@ class Window(QMainWindow):
         self.nas_preferences.setValue('endpoint', endpoint)
 
     def show_activity(self):
-        self.activity_panel.show_at(self.tray)
+        anchor = self.tray if self.tray.isVisible() else self
+        self.activity_panel.show_at(anchor)
         self.refresh_activity()
 
     def refresh_activity(self):

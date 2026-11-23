@@ -3,7 +3,10 @@ import hashlib
 import json
 import os
 from pathlib import Path
+from tempfile import NamedTemporaryFile
 from urllib.parse import urlsplit
+
+from syncthing_bridge.platform_paths import app_data_directory
 
 
 class NasCredentialError(RuntimeError):
@@ -15,10 +18,10 @@ class NasCredentialStore:
 
     def __init__(self, *, path=None):
         if path is None:
-            local_app_data = os.environ.get('LOCALAPPDATA')
-            if not local_app_data:
-                raise NasCredentialError('无法确定本机配置目录')
-            path = Path(local_app_data) / 'UGSync' / 'syncthing-nas.json'
+            try:
+                path = app_data_directory() / 'syncthing-nas.json'
+            except KeyError:
+                raise NasCredentialError('无法确定本机配置目录') from None
         self.path = Path(path)
 
     @staticmethod
@@ -48,11 +51,13 @@ class NasCredentialStore:
             raise NasCredentialError('NAS 本机凭据文件无法读取') from None
 
     def _write(self, credentials):
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self.path.with_suffix(self.path.suffix + '.new')
+        temporary = None
         payload = json.dumps({'schema': 1, 'credentials': credentials}, separators=(',', ':'))
         try:
-            with temporary.open('w', encoding='utf-8', newline='\n') as target:
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+            with NamedTemporaryFile('w', encoding='utf-8', newline='\n', dir=self.path.parent,
+                                    prefix=self.path.name + '.', delete=False) as target:
+                temporary = Path(target.name)
                 target.write(payload)
                 target.flush()
                 os.fsync(target.fileno())
@@ -63,7 +68,8 @@ class NasCredentialStore:
                 pass
         except OSError:
             try:
-                temporary.unlink(missing_ok=True)
+                if temporary is not None:
+                    temporary.unlink(missing_ok=True)
             except OSError:
                 pass
             raise NasCredentialError('NAS 本机凭据文件无法保存') from None

@@ -1,6 +1,7 @@
 """Current-user startup and the bundled background engine."""
 import os
 from pathlib import Path
+from shutil import which
 import subprocess
 import sys
 
@@ -65,9 +66,12 @@ def launch_engine():
         roots.append(Path(sys._MEIPASS))
     else:
         roots.append(Path(__file__).resolve().parents[2])
-    executable = next((p / 'engine/syncthing.exe' for p in roots if (p / 'engine/syncthing.exe').is_file()), None)
+    name = 'syncthing.exe' if os.name == 'nt' else 'syncthing'
+    executable = next((p / 'engine' / name for p in roots if (p / 'engine' / name).is_file()), None)
+    if executable is None and os.name != 'nt':
+        executable = which(name)
     if executable is None:
-        raise RuntimeError('未找到配套同步引擎，请完整解压新版压缩包')
+        raise RuntimeError('未找到 Syncthing 同步引擎，请检查 UGSync 安装是否完整。')
     return subprocess.Popen([str(executable), 'serve', '--no-browser', '--no-upgrade'],
                             creationflags=subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0,
                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,

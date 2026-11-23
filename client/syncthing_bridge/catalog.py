@@ -11,6 +11,7 @@ from urllib.parse import urlsplit
 import httpx
 
 from syncthing_bridge.api import SyncthingError
+from syncthing_bridge.platform_paths import app_data_directory
 from syncthing_bridge.selection import normalize
 
 
@@ -41,7 +42,7 @@ class Catalog:
 
     @staticmethod
     def cache_path():
-        return Path(os.environ['LOCALAPPDATA']) / 'UGSync' / 'catalog-cache.sqlite'
+        return app_data_directory() / 'catalog-cache.sqlite'
 
     def cache_key(self, folder, prefix):
         data = json.dumps([self.endpoint, self.token, folder, prefix])

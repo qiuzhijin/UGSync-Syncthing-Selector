@@ -1,0 +1,44 @@
+name: Ubuntu desktop preview
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ubuntu-preview]
+
+permissions:
+  contents: read
+
+jobs:
+  package:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install build and test dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0
+          python -m pip install '.[ui,dev]' 'pyinstaller==6.22.3' 'pyinstaller-hooks-contrib==2026.9'
+      - name: Run Linux tests
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: python -B -m pytest -q -rs --tb=short -p no:cacheprovider
+      - name: Build and install DEB
+        run: |
+          bash scripts/build_ubuntu_deb.sh 0.1.45 dist/ubuntu
+          (cd dist/ubuntu && sha256sum -c *.sha256)
+          sudo apt-get install -y ./dist/ubuntu/ugsync-selector_0.1.45_amd64.deb
+          test "$(dpkg-query -W -f='${Version}' ugsync-selector)" = 0.1.45
+      - name: Test installed desktop and isolated Syncthing scan
+        run: |
+          xvfb-run -a env QT_QPA_PLATFORM=xcb ugsync-selector --startup-check
+          xvfb-run -a env QT_QPA_PLATFORM=xcb UGSYNC_CATALOG_URL=http://127.0.0.1:8788 UGSYNC_CATALOG_TOKEN=synthetic-build-test-token-00000000 ugsync-selector --startup-check
+          PYTHONPATH=client QT_QPA_PLATFORM=offscreen python scripts/verify_syncthing_selection.py /usr/lib/ugsync-selector/_internal/engine/syncthing --test-exit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ugsync-ubuntu-amd64
+          path: dist/ubuntu/*
+          if-no-files-found: error

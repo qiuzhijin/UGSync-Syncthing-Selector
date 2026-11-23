@@ -3,10 +3,11 @@ from contextlib import contextmanager
 import json
 import logging
 from logging.handlers import RotatingFileHandler
-import os
 from pathlib import Path
 import sys
 import time
+
+from syncthing_bridge.platform_paths import app_data_directory, xdg_directory
 
 
 logger = logging.getLogger(__name__)
@@ -44,9 +45,12 @@ def error_log(directory, *, fallback=None, build=None):
 
 
 def application_log():
-    install = Path(sys.executable).parent / 'logs' if getattr(sys, 'frozen', False) else None
-    appdata = os.environ.get('LOCALAPPDATA')
-    fallback = Path(appdata) / 'UGSync' / 'logs' if appdata else None
+    windows = sys.platform == 'win32'
+    install = Path(sys.executable).parent / 'logs' if windows and getattr(sys, 'frozen', False) else None
+    try:
+        fallback = (app_data_directory() if windows else xdg_directory('XDG_STATE_HOME', '.local/state') / 'ugsync') / 'logs'
+    except KeyError:
+        fallback = None
     build = None
     bundle = getattr(sys, '_MEIPASS', None)
     if bundle:

@@ -4,14 +4,14 @@ from urllib.parse import urlsplit
 import httpx
 
 from syncthing_bridge.diagnostics import logger
+from syncthing_bridge.platform_paths import syncthing_config_path
 
 
 def local_credentials(config_path=None):
-    import os
     from pathlib import Path
     import xml.etree.ElementTree as ET
     try:
-        path = Path(config_path) if config_path is not None else Path(os.environ['LOCALAPPDATA']) / 'Syncthing/config.xml'
+        path = Path(config_path) if config_path is not None else syncthing_config_path()
         if path.stat().st_size > 2 << 20:
             raise ValueError()
         gui = ET.parse(path).getroot().find('gui')

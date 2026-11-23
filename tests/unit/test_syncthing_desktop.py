@@ -1,4 +1,5 @@
 from contextlib import nullcontext
+import os
 from types import SimpleNamespace
 
 from syncthing_bridge import desktop
@@ -59,8 +60,8 @@ def test_user_startup_enable_disable_and_other_entries_preserved():
     assert values == {'UnrelatedApp': ('other', 1)}
 
 
-def test_bundle_engine_launch_is_hidden_and_does_not_change_config(tmp_path, monkeypatch):
-    exe = tmp_path/'engine/syncthing.exe'
+def test_bundle_engine_launch_does_not_change_config(tmp_path, monkeypatch):
+    exe = tmp_path / 'engine' / ('syncthing.exe' if os.name == 'nt' else 'syncthing')
     exe.parent.mkdir()
     exe.write_bytes(b'synthetic')
     monkeypatch.setattr(desktop.sys, 'executable', str(tmp_path/'selector.exe'))
@@ -71,7 +72,7 @@ def test_bundle_engine_launch_is_hidden_and_does_not_change_config(tmp_path, mon
     assert args == [str(exe), 'serve', '--no-browser', '--no-upgrade']
     assert '--home' not in args and '--config' not in args
     assert options['stdin'] == desktop.subprocess.DEVNULL
-    assert options['creationflags'] == desktop.subprocess.CREATE_NO_WINDOW
+    assert options['creationflags'] == (desktop.subprocess.CREATE_NO_WINDOW if os.name == 'nt' else 0)
 
 
 def test_startup_command_quotes_install_path(monkeypatch):

@@ -66,6 +66,8 @@ class WinSparkleUpdates(QObject):
 
 
 def configure_updates(window, menu):
+    if sys.platform != 'win32':
+        return None
     root = getattr(sys, '_MEIPASS', None)
     if root and (Path(root) / 'winsparkle-channel.json').is_file():
         return WinSparkleUpdates(window, menu, Path(root))
