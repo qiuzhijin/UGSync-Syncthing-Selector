@@ -1,0 +1,17 @@
+services:
+  catalog:
+    image: python:3.13-alpine
+    command: ["python", "-B", "/opt/catalog/server.py"]
+    user: "${NAS_UID:-1000}:${NAS_GID:-10}"
+    read_only: true
+    cap_drop: ["ALL"]
+    security_opt: ["no-new-privileges:true"]
+    ports: ["127.0.0.1:8788:8788"]
+    environment:
+      UGSYNC_CATALOG_BIND: "0.0.0.0"
+      UGSYNC_CATALOG_ROOT: /data
+      UGSYNC_CATALOG_FOLDER: "${UGSYNC_CATALOG_FOLDER:?Set the Syncthing folder ID}"
+      UGSYNC_CATALOG_TOKEN: "${UGSYNC_CATALOG_TOKEN:?Set a distinct random catalog token}"
+    volumes:
+      - ./server.py:/opt/catalog/server.py:ro
+      - "${SYNCTHING_DATA:?Set the same folder root Syncthing uses}:/data:ro"

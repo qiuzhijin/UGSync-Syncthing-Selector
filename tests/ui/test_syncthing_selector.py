@@ -209,6 +209,102 @@ def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, i
         window.close()
 
 
+def test_catalog_cache_refresh_keeps_directory_selection(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    directory = 'FILE_INFO_TYPE_DIRECTORY'
+    cached = [{'name': name, 'type': directory} for name in ['Keep', 'Removed']]
+    fresh = [{'name': name, 'type': directory} for name in ['Keep', 'Added']]
+    callbacks = []
+    window.catalog = SimpleNamespace(cached=lambda folder, prefix: cached)
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    monkeypatch.setattr(window, 'read_nas_directories',
+                        lambda folder, prefixes, callback, **kwargs: callbacks.append(callback) or True)
+    try:
+        window.populate(None, '', False)
+        keep = window.tree.topLevelItem(0)
+        assert keep.text(0) == 'Keep'
+        keep.setCheckState(0, Qt.CheckState.Checked)
+        callbacks.pop()({'': fresh}, None)
+        assert window.tree.topLevelItem(0) is keep
+        assert window.choices == {'Keep': True}
+        assert window.tree.topLevelItem(1).text(0) == 'Added'
+
+        cached = fresh
+        window.populate(None, '', False)
+        callbacks.pop()(None, None)
+        assert window.tree.topLevelItem(0) is keep
+        assert window.tree.topLevelItemCount() == 2
+        assert '' in window.cached_directories
+    finally:
+        window.exiting = True
+        window.close()
+
+
+def test_catalog_automatically_refreshes_visible_tree_and_recovers(monkeypatch):
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    directory = 'FILE_INFO_TYPE_DIRECTORY'
+    work = {'name': 'Work', 'type': directory}
+    callbacks = []
+    window.api = SimpleNamespace(close=lambda: None)
+    window.catalog = SimpleNamespace(cached=lambda folder, prefix: None)
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    window.populate_rows(None, '', [work])
+    parent = window.tree.topLevelItem(0)
+    parent.setData(0, Qt.ItemDataRole.UserRole + 1, True)
+    parent.setExpanded(True)
+    parent.setCheckState(0, Qt.CheckState.Checked)
+    monkeypatch.setattr(window, 'read_nas_directories', lambda folder, prefixes, callback, **kwargs:
+                        callbacks.append((prefixes, callback)) or True)
+
+    try:
+        window.catalog_refresh_due = 0
+        window.poll_catalog(100)
+        assert not callbacks
+        window.show()
+        window.poll_catalog(100)
+        prefixes, complete = callbacks.pop()
+        assert prefixes == ('',)
+        window.poll_catalog(105)
+        assert not callbacks
+        complete({'': [work]}, None)
+
+        window.poll_catalog(110)
+        prefixes, complete = callbacks.pop()
+        assert prefixes == ('Work',)
+        complete({'Work': [{'name': 'Added', 'type': directory}]}, None)
+        assert parent.child(0).text(0) == 'Added'
+        assert window.choices == {'Work': True}
+        window.poll_catalog(115)
+        assert not callbacks
+
+        for now in (125, 135, 145, 155):
+            window.poll_catalog(now)
+            assert not callbacks
+        window.poll_catalog(160)
+        prefixes, complete = callbacks.pop()
+        assert prefixes == ('',)
+        complete(None, None)
+        assert window.tree.topLevelItem(0) is parent
+        assert '' in window.cached_directories
+        window.main_tabs.setCurrentIndex(1)
+        window.poll_catalog(165)
+        assert not callbacks
+        window.main_tabs.setCurrentIndex(0)
+        prefixes, complete = callbacks.pop()
+        assert prefixes == ('',)
+        complete({'': [work]}, None)
+        assert '' not in window.cached_directories
+    finally:
+        window.exiting = True
+        window.close()
+
+
 @pytest.mark.parametrize('local_available', [True, False])
 def test_preview_nas_timeout_uses_local_index_and_preserves_saved_files(monkeypatch, tmp_path, local_available):
     import syncthing_bridge.__main__ as ui

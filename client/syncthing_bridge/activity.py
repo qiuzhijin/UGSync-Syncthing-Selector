@@ -44,11 +44,12 @@ class ReadLoginEngine(QRunnable):
 
 
 class ReadNasDirectories(QRunnable):
-    def __init__(self, endpoint, key, folder, peers, prefixes, *, directories_only):
+    def __init__(self, endpoint, key, folder, peers, prefixes, *, directories_only, catalog=None):
         super().__init__()
         self.endpoint, self.key, self.folder = endpoint, key, folder
         self.peers, self.prefixes = peers, prefixes
         self.directories_only = directories_only
+        self.catalog = catalog
         self.signals = Result()
 
     @staticmethod
@@ -60,19 +61,25 @@ class ReadNasDirectories(QRunnable):
 
     def run(self):
         try:
-            with closing(Syncthing(self.endpoint, self.key)) as nas:
-                nas.http.timeout = httpx.Timeout(10, connect=4)
-                identity = self.retry_timeout(nas.request, 'GET', '/rest/system/status')
-                if not identity or identity.get('myID') not in self.peers:
-                    raise SyncthingError('NAS 设备与此同步任务不匹配')
-                rows = {prefix: self.retry_timeout(
-                    nas.browse, self.folder, prefix, directories_only=self.directories_only)
-                    for prefix in self.prefixes}
+            rows = self.read()
         except Exception as error:
             report_exception('browse_nas_selection', error)
             self.signals.ready.emit(self, (None, error))
         else:
             self.signals.ready.emit(self, (rows, None))
+
+    def read(self):
+        if self.catalog is not None:
+            return self.catalog.listings(self.folder, self.prefixes, directories_only=self.directories_only)
+        else:
+            with closing(Syncthing(self.endpoint, self.key)) as nas:
+                nas.http.timeout = httpx.Timeout(10, connect=4)
+                identity = self.retry_timeout(nas.request, 'GET', '/rest/system/status')
+                if not identity or identity.get('myID') not in self.peers:
+                    raise SyncthingError('NAS 设备与此同步任务不匹配')
+                return {prefix: self.retry_timeout(
+                    nas.browse, self.folder, prefix, directories_only=self.directories_only)
+                    for prefix in self.prefixes}
 
 
 class ReadProgress(QRunnable):

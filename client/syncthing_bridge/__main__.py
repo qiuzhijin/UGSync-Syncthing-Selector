@@ -1,16 +1,20 @@
 """Run with: python -m syncthing_bridge."""
 import os
 import sys
+from collections import deque
 from pathlib import Path
+from time import time
 from shiboken6 import isValid
 
 from PySide6.QtCore import Qt, QTimer, QThreadPool, Slot, QSettings, QUrl
 from PySide6.QtGui import QDesktopServices
+from PySide6.QtNetwork import QNetworkInformation
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSystemTrayIcon, QMenu, QStyle,
     QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar,
     QMessageBox, QPushButton, QTabWidget, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from syncthing_bridge.api import Syncthing, SyncthingError, SyncthingTimeout, local_credentials
+from syncthing_bridge.catalog import Catalog
 from syncthing_bridge.appearance import apply_appearance
 from syncthing_bridge.selection import normalize, parse_document, compile_document, direct_file_parents, saved_direct_files
 from syncthing_bridge.desktop import startup_enabled, set_startup, engine_available, launch_engine
@@ -45,6 +49,15 @@ class Window(QMainWindow):
         self.progress_worker = None
         self.engine_credentials = None
         self.incomplete_directories = set()
+        self.cached_directories = set()
+        self.catalog_refresh_due = None
+        self.catalog_refresh_queue = deque()
+        self.catalog_last_poll = None
+        try:
+            self.catalog = Catalog.from_environment()
+        except (KeyError, ValueError) as error:
+            report_exception('catalog_configuration', error)
+            self.catalog = None
         self.nas_directory_jobs = {}
         self.loading_directories = set()
         self.activity_worker = None
@@ -194,6 +207,9 @@ class Window(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_status)
         self.timer.start(5000)
+        if self.catalog and QNetworkInformation.loadDefaultBackend():
+            QNetworkInformation.instance().reachabilityChanged.connect(self.catalog_reachability_changed)
+        self.main_tabs.currentChanged.connect(lambda _: self.catalog_connection_changed())
         self.tray = QSystemTrayIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon), self)
         self.tray.setToolTip('文件夹同步 · Syncthing')
         menu = QMenu(self)
@@ -302,6 +318,8 @@ class Window(QMainWindow):
         self.activateWindow()
         if self.selection_needs_load:
             self.run(self.load_folder)
+        else:
+            self.catalog_connection_changed()
 
     def change_overlays(self, enabled, *, allow_install=False):
         if self.overlay_publisher:
@@ -525,8 +543,59 @@ class Window(QMainWindow):
 
     def poll_status(self):
         self.refresh_status()
+        self.poll_catalog(time())
         if self.activity_panel.isVisible():
             self.refresh_activity()
+
+    def catalog_reachability_changed(self, reachability):
+        if reachability not in (QNetworkInformation.Reachability.Disconnected,
+                                 QNetworkInformation.Reachability.Unknown):
+            self.catalog_connection_changed()
+
+    def catalog_connection_changed(self):
+        if self.catalog_refresh_due is not None:
+            self.catalog_refresh_due = 0
+            self.catalog_refresh_queue.clear()
+            self.poll_catalog(time())
+
+    def poll_catalog(self, now):
+        previous, self.catalog_last_poll = self.catalog_last_poll, now
+        if (self.catalog_refresh_due is None or not self.catalog or not self.api or self.exiting
+                or not self.isVisible() or self.isMinimized() or self.main_tabs.currentIndex() != 0):
+            return
+        if previous is not None and (now < previous or now - previous > 15):
+            self.catalog_refresh_due = 0
+            self.catalog_refresh_queue.clear()
+        if self.nas_directory_jobs or self.loading_directories or not self.preview_button.isEnabled():
+            return
+        if not self.catalog_refresh_queue:
+            if now < self.catalog_refresh_due:
+                return
+            self.catalog_refresh_due = now + 60
+            self.catalog_refresh_queue.append(None)
+            nodes = deque(self.tree.topLevelItem(i) for i in range(self.tree.topLevelItemCount()))
+            while nodes:
+                node = nodes.popleft()
+                if node.isExpanded():
+                    self.catalog_refresh_queue.append(node)
+                    nodes.extend(node.child(i) for i in range(node.childCount()))
+
+        while self.catalog_refresh_queue:
+            parent = self.catalog_refresh_queue.popleft()
+            if parent is not None and not self.catalog_directory_visible(parent):
+                continue
+            prefix = parent.data(0, Qt.ItemDataRole.UserRole) if parent is not None else ''
+            self.populate(parent, prefix, False, refresh=True, requested_at=now)
+            break
+
+    def catalog_directory_visible(self, item):
+        if not isValid(item) or item.treeWidget() is not self.tree:
+            return False
+        while item is not None:
+            if not item.isExpanded():
+                return False
+            item = item.parent()
+        return True
 
     def run(self, action, operation=None):
         try:
@@ -572,6 +641,9 @@ class Window(QMainWindow):
         self.tree.clear()
         self.loading_directories.clear()
         self.incomplete_directories.clear()
+        self.cached_directories.clear()
+        self.catalog_refresh_due = None
+        self.catalog_refresh_queue.clear()
         self.set_preview_busy(False)
         self.update_directory_notice()
         self.progress_display = ProgressDisplay()
@@ -589,6 +661,8 @@ class Window(QMainWindow):
         if current.get('paused'):
             self.status.setText('此任务已暂停，Syncthing 暂不提供目录树。恢复任务后重新连接可编辑已有范围；保存选择时会自动暂停。')
             return
+        if self.catalog:
+            self.catalog_refresh_due = time() + 60
         self.populate(None, '', entire)
         self.status.setText('已恢复目录选择，现有排除规则会保留。保存后可点击“继续同步”。')
         self.refresh_status()
@@ -596,7 +670,10 @@ class Window(QMainWindow):
     def update_directory_notice(self):
         message = ('NAS 目录清单不完整，当前有目录只显示本机索引。可重新展开相应目录，'
                    '或在设置中重新连接以重读根目录。')
-        if self.loading_directories:
+        if self.cached_directories:
+            message = ('当前有目录使用上次成功读取的清单。正在后台更新…' if self.loading_directories else
+                       '部分目录显示上次成功读取的清单，程序会自动重试。')
+        elif self.loading_directories:
             message = '正在读取 NAS 目录清单…'
         elif not self.incomplete_directories:
             message = ''
@@ -608,13 +685,16 @@ class Window(QMainWindow):
 
     def read_nas_directories(self, folder, prefixes, callback, *, directories_only):
         credentials = self.nas_directory_credentials()
-        if not all(credentials):
-            return False
-        task = next((row for row in self.api.folders() if row['id'] == folder), None)
-        peers = {device['deviceID'] for device in (task or {}).get('devices', [])}
-        if not peers:
-            return False
-        worker = ReadNasDirectories(*credentials, folder, peers, prefixes, directories_only=directories_only)
+        peers = set()
+        if self.catalog is None:
+            if not all(credentials):
+                return False
+            task = next((row for row in self.api.folders() if row['id'] == folder), None)
+            peers = {device['deviceID'] for device in (task or {}).get('devices', [])}
+            if not peers:
+                return False
+        worker = ReadNasDirectories(*credentials, folder, peers, prefixes,
+                                    directories_only=directories_only, catalog=self.catalog)
         self.nas_directory_jobs[worker] = (self.progress_display, credentials, callback)
         worker.signals.ready.connect(self.nas_directories_ready)
         QThreadPool.globalInstance().start(worker)
@@ -626,12 +706,12 @@ class Window(QMainWindow):
         if self.exiting or context is not self.progress_display:
             return
         rows, error = outcome
-        if credentials != self.nas_directory_credentials():
+        if self.catalog is None and credentials != self.nas_directory_credentials():
             rows, error = None, SyncthingError('NAS 设置已更改，请重试')
         self.run(lambda: callback(rows, error), 'read_nas_directory_result')
 
     def selection_rows(self, folder, prefix, *, directories_only=True, nas_rows=None):
-        incomplete = any(self.nas_directory_credentials()) and nas_rows is None
+        incomplete = bool(self.catalog or any(self.nas_directory_credentials())) and nas_rows is None
         local_error = None
         try:
             local_rows = self.api.browse(folder, prefix) if directories_only else self.api.browse(
@@ -653,30 +733,53 @@ class Window(QMainWindow):
         rows.update({(row['name'].casefold(), row.get('type')): row for row in local_rows})
         return [rows[key] for key in sorted(rows, key=lambda item: item[0])]
 
-    def populate(self, parent, prefix, checked):
+    def populate(self, parent, prefix, checked, *, refresh=False, requested_at=None):
         if prefix in self.loading_directories:
             return
         folder = self.folders.currentData()
+        cached = self.catalog.cached(folder, prefix) if self.catalog and not refresh else None
+        if cached is not None:
+            self.cached_directories.add(prefix)
+            self.incomplete_directories.add(prefix)
+            self.populate_rows(parent, prefix, cached)
 
         def complete(nas, error):
             self.loading_directories.discard(prefix)
-            self.update_directory_notice()
             if parent is not None and (not isValid(parent) or parent.treeWidget() is not self.tree):
+                self.cached_directories.discard(prefix)
+                self.update_directory_notice()
                 return
-            rows = self.selection_rows(folder, prefix, nas_rows=None if nas is None else nas[prefix])
+            if nas is None and refresh:
+                if not prefix and self.catalog_refresh_due != 0:
+                    self.catalog_refresh_due = requested_at + 15
+                self.cached_directories.add(prefix)
+                self.update_directory_notice()
+                return
+            if nas is None and cached is not None:
+                self.update_directory_notice()
+                return
+            self.cached_directories.discard(prefix)
+            if self.catalog and nas is not None:
+                self.incomplete_directories.discard(prefix)
+                rows = nas[prefix]
+                self.update_directory_notice()
+            else:
+                rows = self.selection_rows(folder, prefix, nas_rows=None if nas is None else nas[prefix])
             self.populate_rows(parent, prefix, rows)
 
         if self.read_nas_directories(folder, (prefix,), complete, directories_only=True):
             self.loading_directories.add(prefix)
-            self.update_directory_notice()
+            if not refresh:
+                self.update_directory_notice()
         else:
             complete(None, None)
 
     def populate_rows(self, parent, prefix, rows):
+        container = self.tree.invisibleRootItem() if parent is None else parent
+        existing = {container.child(i).data(0, Qt.ItemDataRole.UserRole): container.child(i)
+                    for i in range(container.childCount())}
         self.updating = True
         try:
-            if parent is not None:
-                parent.takeChildren()
             for row in rows:
                 if row.get('type') != 'FILE_INFO_TYPE_DIRECTORY':
                     continue
@@ -684,6 +787,8 @@ class Window(QMainWindow):
                 if not isinstance(name, str) or '/' in name:
                     raise ValueError('引擎返回了不支持的目录名称')
                 path = normalize(prefix + '/' + name if prefix else name)
+                if existing.pop(path, None) is not None:
+                    continue
                 item = QTreeWidgetItem([name])
                 item.setData(0, Qt.ItemDataRole.UserRole, path)
                 item.setData(0, Qt.ItemDataRole.UserRole + 1, False)
@@ -702,6 +807,13 @@ class Window(QMainWindow):
                     self.tree.addTopLevelItem(item)
                 else:
                     parent.addChild(item)
+            for path, item in existing.items():
+                container.removeChild(item)
+                for pending in (self.cached_directories, self.incomplete_directories):
+                    pending.difference_update({name for name in pending
+                                               if name == path or name.startswith(path + '/')})
+            if existing:
+                self.update_directory_notice()
             if parent is not None:
                 parent.setData(0, Qt.ItemDataRole.UserRole + 1, prefix not in self.incomplete_directories)
         finally:
@@ -794,8 +906,9 @@ class Window(QMainWindow):
 
     def show_selection_preview(self, folder, included, excluded, entire, parents, nas):
         direct_files = []
-        local_only = bool(parents and not nas and any(self.nas_directory_credentials()))
-        prior_files = saved_direct_files(self.previous, self.escape) if local_only else []
+        local_only = bool(parents and not nas and (self.catalog or any(self.nas_directory_credentials())))
+        catalog_used = bool(parents and nas and self.catalog)
+        prior_files = saved_direct_files(self.previous, self.escape) if local_only or catalog_used else []
         if parents:
             config = next(row for row in self.api.folders() if row['id'] == folder)
             root = Path(os.path.expandvars(config['path'])).expanduser()
@@ -830,6 +943,10 @@ class Window(QMainWindow):
         layout = QVBoxLayout(dialog)
         if local_only:
             notice = QLabel('未能核对 NAS 清单。此预览使用本机索引、磁盘及已保存的直属文件规则。尚未进入本机索引的 NAS 文件可能需要稍后重新核对。')
+            notice.setWordWrap(True)
+            layout.addWidget(notice)
+        elif catalog_used:
+            notice = QLabel('NAS 目录来自 NAS 上实际存在的文件，并与可用的本机索引合并。其他设备尚未同步到这两处的文件可能未列出。')
             notice.setWordWrap(True)
             layout.addWidget(notice)
         layout.addWidget(QLabel('保存时自动暂停此任务，再替换本机忽略规则。保存后保持暂停。\n'
