@@ -1,0 +1,48 @@
+name: Windows tray acceptance (temporary)
+on:
+  push:
+    branches: [validation/tray-windows-20261123]
+permissions:
+  contents: read
+jobs:
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 20
+    env:
+      QT_QPA_PLATFORM: offscreen
+      PYTHONUTF8: '1'
+      PYTHONPATH: client
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Prepare Windows dependencies
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .venv/Scripts/python.exe -m pip install '.[ui,dev,build]'
+      - name: Build and verify Explorer overlays
+        shell: pwsh
+        run: ./scripts/build_overlays.ps1
+      - name: Test application and aggregated tray activity
+        shell: pwsh
+        run: |
+          .venv/Scripts/python.exe -B -m pytest -q -rs --tb=short -p no:cacheprovider
+      - name: Verify Windows Syncthing and build desktop EXE
+        shell: pwsh
+        run: |
+          $archive = Join-Path $env:RUNNER_TEMP 'syncthing-windows-amd64-v2.1.7.zip'
+          Invoke-WebRequest 'https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-windows-amd64-v2.1.7.zip' -OutFile $archive
+          if ((Get-FileHash $archive -Algorithm SHA256).Hash -ne '3ce7da770f546a8d02b65b2e7ee31f2a3b8b7c3f990ede045590cca4172ecfe1') { throw 'Syncthing SHA-256 mismatch' }
+          Expand-Archive -LiteralPath $archive -DestinationPath '.tools/syncthing-2.1.7'
+          .venv/Scripts/python.exe -m PyInstaller --noconfirm --log-level WARN scripts/syncthing-selector.spec
+      - name: Test bundled app and isolated Syncthing
+        shell: pwsh
+        run: |
+          $bundle = 'dist/UGSync-Syncthing-Selector'
+          $app = Start-Process -FilePath "$bundle/UGSync-Syncthing-Selector.exe" -ArgumentList '--startup-check' -PassThru
+          if (!$app.WaitForExit(45000)) { $app.Kill(); throw 'Desktop startup check timed out' }
+          if ($app.ExitCode -ne 0) { throw "Desktop startup check returned $($app.ExitCode)" }
+          .venv/Scripts/python.exe -B scripts/verify_syncthing_selection.py "$bundle/_internal/engine/syncthing.exe" --test-exit
