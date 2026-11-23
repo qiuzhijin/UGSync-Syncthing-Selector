@@ -825,45 +825,50 @@ def test_selector_restores_saved_nas_connection(monkeypatch):
     window.close()
 
 
-@pytest.mark.parametrize('nas_identity', ['nas', 'other'])
-def test_activity_reader_merges_only_verified_nas_download_rows(monkeypatch, nas_identity):
+def test_activity_reader_aggregates_tasks_without_merging_same_name(monkeypatch):
     import syncthing_bridge.activity as activity_module
+    from syncthing_bridge.api import Syncthing, SyncthingError
 
-    class Engine:
+    class Engine(Syncthing):
         def __init__(self, endpoint, key):
-            self.endpoint = endpoint
             self.http = SimpleNamespace(timeout=None)
-        def activity(self, folder, **kwargs):
-            return {'current': [], 'queue': [], 'recent': [], 'notices': [], 'tracked': [],
-                    'uploads': [], 'page': 1, 'has_more': False}
-        def folders(self):
-            return [{'id': 'drive', 'devices': [{'deviceID': 'local'}, {'deviceID': 'nas'}]}]
-        def request(self, method, route):
-            assert route == '/rest/system/status'
-            return {'myID': nas_identity if self.endpoint == 'http://nas.invalid:8384' else 'local'}
-        def download_activity(self, folder, **kwargs):
-            assert nas_identity == 'nas'
-            assert self.endpoint == 'http://nas.invalid:8384'
-            return {'current': [{'name': 'nas-live.txt', 'status': 'NAS 正在下载'}],
-                    'queue': [{'name': 'nas-wait.txt', 'status': 'NAS 等待下载'}], 'has_more': True}
+
         def close(self):
             pass
 
+        def folders(self):
+            return [{'id': 'first', 'label': '工作'}, {'id': 'second', 'label': '备份'},
+                    {'id': 'unavailable', 'label': '离线任务'}]
+
+        def request(self, method, route, **kwargs):
+            if route == '/rest/events':
+                return [{'type': 'ItemFinished', 'time': '2026-11-23T12:00:00Z',
+                         'data': {'folder': task, 'item': '报告.txt', 'type': 'file'}}
+                        for task in ('first', 'second')]
+            if route == '/rest/system/status':
+                return {'myID': 'local'}
+            if route == '/rest/system/connections':
+                return {'total': {'inBytesTotal': 10, 'outBytesTotal': 4}}
+            task = kwargs['params']['folder']
+            if route == '/rest/db/need':
+                return {'progress': [{'name': '报告.txt'}]} if task == 'first' else {}
+            if route == '/rest/db/status':
+                if task == 'unavailable':
+                    raise SyncthingError('读取失败')
+                return {'state': 'syncing' if task == 'first' else 'idle', 'needTotalItems': int(task == 'first')}
+            raise AssertionError(route)
+
     monkeypatch.setattr(activity_module, 'Syncthing', Engine)
-    worker = ReadActivity('http://127.0.0.1:8384', 'local', 'drive', [],
-                          nas_endpoint='http://nas.invalid:8384', nas_key='nas-key')
+    worker = ReadActivity('http://127.0.0.1:8384', 'local', {}, {})
     received = []
     worker.signals.ready.connect(lambda result, error: received.append((result, error)))
     worker.run()
     result, error = received[0]
     assert error is None
-    if nas_identity != 'nas':
-        assert not result['current'] and not result['queue']
-        assert result['queue_incomplete']
-        return
-    assert result['current'][0]['name'] == 'nas-live.txt'
-    assert result['queue'][0]['name'] == 'nas-wait.txt'
-    assert result['has_more']
+    assert result['title'] == '正在同步'
+    assert [(row['task'], row['name'], row['status']) for row in result['rows'][:2]] == [
+        ('工作', '报告.txt', '正在下载到本机'), ('备份', '报告.txt', '已接收完成')]
+    assert '1 个任务状态暂不可用' in result['detail']
 
 
 def test_tray_single_click_opens_activity_double_click_opens_settings(monkeypatch):
@@ -880,54 +885,28 @@ def test_tray_single_click_opens_activity_double_click_opens_settings(monkeypatc
     window.close()
 
 
-def test_activity_panel_preserves_filenames_and_clears_stale_rows_on_error():
+def test_activity_panel_shows_one_list_and_clears_stale_rows_on_error():
     app = QApplication.instance() or QApplication([])
     window = Window()
     panel = window.activity_panel
-    panel.display({'current': [{'name': '工作/报告.txt', 'status': '正在下载'}],
-                   'recent': [], 'notices': []}, None)
-    assert '工作/报告.txt' in panel.lists['current'].topLevelItem(0).text(0)
+    panel.display({'title': '正在同步', 'detail': '2 个任务',
+                   'rows': [{'name': '报告.txt', 'task': '工作', 'status': '正在下载'},
+                            {'name': '备份.zip', 'task': '备份', 'status': '等待下载'}]}, None)
+    assert panel.heading.text() == '正在同步'
+    assert panel.files.topLevelItemCount() == 2
+    assert [panel.files.topLevelItem(0).text(i) for i in range(3)] == ['报告.txt', '工作', '正在下载']
     panel.display(None, '读取失败')
-    assert panel.lists['current'].topLevelItemCount() == 0
-    assert panel.lists['notices'].topLevelItem(0).text(0) == '读取失败'
+    assert panel.files.topLevelItemCount() == 0
+    assert panel.detail.text() == '读取失败'
     window.exiting = True
     window.close()
 
 
-def test_activity_panel_separates_live_transfer_from_queue():
+def test_activity_response_for_previous_connection_is_discarded():
     app = QApplication.instance() or QApplication([])
     window = Window()
-    panel = window.activity_panel
-    panel.display({'current': [], 'queue': [{'name': '待上传.txt', 'status': '等待上传至对端'}],
-                   'recent': [], 'notices': []}, None)
-    assert panel.tabs.tabText(0) == '正在传输'
-    assert panel.tabs.tabText(1) == '等待队列'
-    assert '没有正在下载文件' in panel.lists['current'].topLevelItem(0).text(0)
-    assert '待上传.txt' in panel.lists['queue'].topLevelItem(0).text(0)
-    window.exiting = True
-    window.close()
-
-
-def test_second_page_error_restores_back_button_and_clears_loading():
-    app = QApplication.instance() or QApplication([])
-    window = Window()
-    panel = window.activity_panel
-    panel.page = 2
-    panel.previous_page.setEnabled(False)
-    panel.page_label.setText('第 2 页（读取中）')
-    panel.display(None, '读取失败')
-    assert panel.previous_page.isEnabled()
-    assert '读取中' not in panel.page_label.text()
-    assert '第 2 页' in panel.page_label.text()
-    window.exiting = True
-    window.close()
-
-
-def test_activity_response_for_previous_task_is_discarded():
-    app = QApplication.instance() or QApplication([])
-    window = Window()
-    window.activity_context = (object(), 'previous')
-    window.activity_ready({'current': [{'name': '旧任务.txt', 'status': '正在下载'}]}, None)
-    assert window.activity_panel.lists['current'].topLevelItemCount() == 0
+    window.activity_context = object()
+    window.activity_ready({'rows': [{'name': '旧文件.txt', 'status': '正在下载'}]}, None)
+    assert window.activity_panel.files.topLevelItemCount() == 0
     window.exiting = True
     window.close()

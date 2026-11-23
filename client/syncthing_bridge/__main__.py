@@ -63,8 +63,9 @@ class Window(QMainWindow):
         self.loading_directories = set()
         self.activity_worker = None
         self.activity_context = None
-        self.activity_tracked = []
-        self.activity_uploads = []
+        self.activity_tracked = {}
+        self.activity_uploads = {}
+        self.activity_speed = ProgressDisplay()
         self.activity_panel = ActivityPanel(self)
         self.overlay_publisher = None
         self.overlay_preferences = QSettings('UGSync', 'ExplorerOverlays')
@@ -377,40 +378,46 @@ class Window(QMainWindow):
         self.refresh_activity()
 
     def refresh_activity(self):
-        folder = self.folders.currentData()
-        if not self.api or not folder:
-            if self.startup_connection:
-                return
-            self.activity_panel.display(None, '尚未连接同步任务，请打开设置连接本机。')
+        if not self.api or not self.engine_credentials:
+            if not self.startup_connection:
+                self.activity_panel.display(None, '尚未连接本机同步引擎。')
             return
-        if self.activity_worker is not None:
+        if self.exiting or self.activity_worker is not None:
             return
-        if self.activity_context != (self.api, folder):
-            self.activity_tracked = []
-            self.activity_uploads = []
+        if self.activity_context is not self.api:
+            self.activity_tracked = {}
+            self.activity_uploads = {}
+            self.activity_speed = ProgressDisplay()
             self.activity_panel.page = 1
-        worker = ReadActivity(self.endpoint.text().strip(), self.key.text().strip(), folder,
-                              list(self.activity_tracked), self.activity_panel.page,
-                              self.nas_endpoint.text(), self.nas_key.text())
+            self.activity_panel.display(None, '正在读取本机同步状态…')
+        worker = ReadActivity(*self.engine_credentials, self.activity_tracked,
+                              self.activity_uploads, self.activity_panel.page)
         self.activity_worker = worker
-        self.activity_context = (self.api, folder)
+        self.activity_context = self.api
         self.activity_page = self.activity_panel.page
         worker.signals.ready.connect(self.activity_ready)
         QThreadPool.globalInstance().start(worker)
 
     @Slot(object, object)
     def activity_ready(self, result, error):
-        api, folder = self.activity_context
         self.activity_worker = None
-        # Discard responses from a previous task or connection.
-        if (not self.exiting and self.api is api and self.folders.currentData() == folder and
-                self.activity_panel.page == getattr(self, 'activity_page', 1)):
-            if result is not None:
-                self.activity_tracked = result.get('tracked', [])
-                self.activity_uploads = (result.get('uploads', []) + self.activity_uploads)[:100]
-                result['recent'] = sorted(result['recent'] + self.activity_uploads,
-                                          key=lambda row: row.get('time', ''), reverse=True)[:100]
-            self.activity_panel.display(result, error)
+        if (self.exiting or self.activity_context is not self.api or
+                self.activity_page != self.activity_panel.page):
+            if not self.exiting and self.activity_panel.isVisible():
+                self.refresh_activity()
+            return
+        if result is not None:
+            self.activity_tracked = result['tracked']
+            self.activity_uploads = result['uploads']
+            if result['traffic'] is not None:
+                result['detail'] += '\n' + self.activity_speed.speed(result['traffic'])
+            else:
+                self.activity_speed.previous = None
+            self.tray.setToolTip('文件夹同步 · ' + result['title'])
+        else:
+            self.activity_speed.previous = None
+            self.tray.setToolTip('文件夹同步 · 状态暂不可用')
+        self.activity_panel.display(result, error)
 
     def show_window(self):
         self.showNormal()
@@ -543,7 +550,7 @@ class Window(QMainWindow):
     def show_login_status(self, message):
         self.status.setText(message)
         self.tray.setToolTip('文件夹同步 · ' + message)
-        self.activity_panel.overview(None, message, '', self.folders.currentText())
+        self.activity_panel.display(None, message)
 
     def probe_login_engine(self):
         if self.exiting or not self.startup_connection or self.login_worker is not None:
@@ -620,8 +627,6 @@ class Window(QMainWindow):
         self.progress_bar.setFormat(title)
         self.progress_detail.setText(detail)
         self.status.setText(title)
-        self.tray.setToolTip('文件夹同步 · ' + title)
-        self.activity_panel.overview(percent, title, detail, self.folders.currentText())
 
     @Slot(object, object)
     def progress_ready(self, snapshot, error):
@@ -637,7 +642,6 @@ class Window(QMainWindow):
             self.progress_bar.setFormat('状态暂时不可用')
             self.progress_detail.setText('暂时无法读取同步进度')
             self.status.setText('暂时无法读取状态，请检查引擎是否运行。')
-            self.activity_panel.overview(0, '状态暂时不可用', '请检查同步引擎连接', self.folders.currentText())
         else:
             self.display_progress(snapshot)
 

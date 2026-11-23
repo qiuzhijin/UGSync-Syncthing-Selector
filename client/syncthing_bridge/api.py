@@ -152,16 +152,26 @@ class Syncthing:
             raise SyncthingError('目录树格式不受支持')
         return value
 
-    def activity(self, folder, *, tracked=(), page=1):
+    def activity(self, folder, *, tracked=(), page=1, task=None, shared=None):
         """Read a bounded sample; remote need is a queue, not proof of transfer."""
         if type(page) is not int or page < 1:
             raise ValueError('页码无效')
-        current = next(row for row in self.folders() if row['id'] == folder)
+        current = task if task is not None else next(row for row in self.folders() if row['id'] == folder)
         result = {'current': [], 'queue': [], 'recent': [], 'notices': [], 'tracked': list(tracked),
                   'uploads': [], 'page': page, 'has_more': False}
         def read(route, notice, **kwargs):
             try:
-                return self.request('GET', route, **kwargs)
+                if shared is None or route not in ('/rest/events', '/rest/system/status', '/rest/system/connections'):
+                    return self.request('GET', route, **kwargs)
+                if route not in shared:
+                    try:
+                        shared[route] = self.request('GET', route, **kwargs)
+                    except SyncthingError as error:
+                        shared[route] = error
+                value = shared[route]
+                if isinstance(value, SyncthingError):
+                    raise value
+                return value
             except SyncthingError as error:
                 result['notices'].append({'name': notice, 'status': str(error)})
                 return None

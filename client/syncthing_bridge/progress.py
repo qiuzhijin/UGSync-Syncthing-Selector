@@ -15,14 +15,7 @@ class ProgressDisplay:
         self.clock = clock
         self.previous = None
 
-    def update(self, snapshot):
-        if snapshot.get('paused'):
-            self.previous = None
-            return 0, '已暂停', '点击“继续同步”恢复任务'
-        local = snapshot['local']
-        peers = [peer for peer in snapshot['peers'] if peer.get('connected')]
-        offline = len(snapshot['peers']) - len(peers)
-        total = snapshot.get('traffic', {})
+    def speed(self, total):
         now = self.clock()
         counters = (total.get('inBytesTotal', 0), total.get('outBytesTotal', 0))
         speed = '引擎总速度：正在采样'
@@ -33,6 +26,17 @@ class ProgressDisplay:
                 speed = '引擎总速度：下载 %s/s · 上传 %s/s' % tuple(
                     size_text((a-b)/elapsed) for a,b in zip(counters, previous))
         self.previous = (now, counters)
+        return speed
+
+    def update(self, snapshot):
+        if snapshot.get('paused'):
+            self.previous = None
+            return 0, '已暂停', '点击“继续同步”恢复任务'
+        local = snapshot['local']
+        peers = [peer for peer in snapshot['peers'] if peer.get('connected')]
+        offline = len(snapshot['peers']) - len(peers)
+        total = snapshot.get('traffic', {})
+        speed = self.speed(total)
         need = max(0, local.get('needBytes', 0))
         total_bytes = max(0, local.get('inSyncBytes', 0)) + need
         local_percent = 100 * (total_bytes - need) / total_bytes if total_bytes else 100
