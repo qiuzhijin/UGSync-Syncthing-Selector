@@ -1,0 +1,177 @@
+name: UGSync v0.1.46 preview packaging
+on:
+  push:
+    branches: [release/preview-0.1.46]
+permissions:
+  contents: read
+concurrency:
+  group: ugsync-preview-0.1.46
+  cancel-in-progress: false
+env:
+  VERSION: 0.1.46
+  SOURCE_SHA: 56b77f9c4620e64088a16c9337b87a65b51cfb56
+jobs:
+  ubuntu:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 18
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install dependencies and test
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y xvfb xauth libegl1 libgl1 libxcb-cursor0 libxkbcommon-x11-0
+          python -m pip install '.[ui,dev]' 'pyinstaller==6.22.3' 'pyinstaller-hooks-contrib==2026.9'
+          QT_QPA_PLATFORM=offscreen python -B -m pytest -q -rs --tb=short -p no:cacheprovider
+      - name: Build and validate apt installation and upgrade
+        run: |
+          set -euo pipefail
+          bash scripts/build_ubuntu_deb.sh "$VERSION" dist/ubuntu
+          (cd dist/ubuntu && sha256sum -c *.sha256)
+          echo "DEB SHA-256: $(cat dist/ubuntu/*.sha256)"
+          old="$RUNNER_TEMP/ugsync-selector_0.1.45_amd64.deb"
+          curl -fsSL --retry 3 --max-time 300 -o "$old" 'https://github.com/qiuzhijin/UGSync-Syncthing-Selector/releases/download/ubuntu-v0.1.45/ugsync-selector_0.1.45_amd64.deb'
+          printf '%s  %s\n' 50ea238aa682108e346b4a92f677a663acbb610ee84155c2db4d3d55ad8de806 "$old" | sha256sum -c -
+          sudo apt-get install -y "$old"
+          sudo apt-get install -y "./dist/ubuntu/ugsync-selector_${VERSION}_amd64.deb"
+          test "$(dpkg-query -W -f='${Version}' ugsync-selector)" = "$VERSION"
+      - name: Test installed desktop and isolated Syncthing
+        run: |
+          xvfb-run -a env QT_QPA_PLATFORM=xcb ugsync-selector --startup-check
+          xvfb-run -a env QT_QPA_PLATFORM=xcb UGSYNC_CATALOG_URL=http://127.0.0.1:8788 UGSYNC_CATALOG_TOKEN=synthetic-build-test-token-00000000 ugsync-selector --startup-check
+          PYTHONPATH=client QT_QPA_PLATFORM=offscreen python -B scripts/verify_syncthing_selection.py /usr/lib/ugsync-selector/_internal/engine/syncthing --test-exit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ubuntu-amd64
+          path: dist/ubuntu/*
+          if-no-files-found: error
+  windows:
+    runs-on: windows-2025
+    timeout-minutes: 22
+    env:
+      PYTHONUTF8: '1'
+      PYTHONPATH: client
+      QT_QPA_PLATFORM: offscreen
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.SOURCE_SHA }}
+          persist-credentials: false
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+          architecture: x64
+      - name: Install dependencies and test
+        shell: pwsh
+        run: |
+          python -m venv .venv
+          .venv/Scripts/python.exe -m pip install '.[ui,dev,build]'
+          ./scripts/build_overlays.ps1
+          .venv/Scripts/python.exe -B -m pytest -q -rs --tb=short -p no:cacheprovider
+      - name: Build Windows x64 installer
+        shell: pwsh
+        run: |
+          $zip = Join-Path $env:RUNNER_TEMP 'syncthing-windows-amd64-v2.1.7.zip'
+          Invoke-WebRequest 'https://github.com/syncthing/syncthing/releases/download/v2.1.7/syncthing-windows-amd64-v2.1.7.zip' -OutFile $zip
+          if ((Get-FileHash $zip).Hash -ne '3ce7da770f546a8d02b65b2e7ee31f2a3b8b7c3f990ede045590cca4172ecfe1') { throw 'Syncthing SHA-256 mismatch' }
+          Expand-Archive -LiteralPath $zip -DestinationPath '.tools/syncthing-2.1.7'
+          $zip = Join-Path $env:RUNNER_TEMP 'WinSparkle-0.9.4.zip'
+          Invoke-WebRequest 'https://github.com/vslavik/winsparkle/releases/download/v0.9.4/WinSparkle-0.9.4.zip' -OutFile $zip
+          if ((Get-FileHash $zip).Hash -ne '6037df37fc263bd1650a1c4949681a9d40ffe991d01f35892a406cb5d103c976') { throw 'WinSparkle SHA-256 mismatch' }
+          Expand-Archive -LiteralPath $zip -DestinationPath '.tools/winsparkle'
+          $dlls = @(Get-ChildItem '.tools/winsparkle' -Filter 'WinSparkle.dll' -Recurse | Where-Object { $_.FullName -match '[\\/](x64|amd64)[\\/]' })
+          if ($dlls.Count -ne 1) { throw 'Expected one WinSparkle x64 DLL' }
+          $env:UGSYNC_WINSPARKLE_DLL = $dlls[0].FullName
+          $env:UGSYNC_WINSPARKLE_CHANNEL = (Resolve-Path 'scripts/winsparkle-channel.json').Path
+          .venv/Scripts/python.exe -m PyInstaller --noconfirm --log-level WARN scripts/syncthing-selector.spec
+          $bundle = (Resolve-Path 'dist/UGSync-Syncthing-Selector').Path
+          Copy-Item LICENSE "$bundle/LICENSE"
+          New-Item -ItemType Directory "$bundle/THIRD-PARTY" | Out-Null
+          Copy-Item docs/selector-third-party-sources.md "$bundle/THIRD-PARTY/"
+          Copy-Item "$bundle/_internal/engine/LICENSE.txt" "$bundle/THIRD-PARTY/Syncthing.txt"
+          $licenseFiles = @(Get-ChildItem '.tools/winsparkle' -File -Recurse | Where-Object { $_.Name -match '^(copying|licen[cs]e)' })
+          if (!$licenseFiles.Count) { throw 'WinSparkle license not found' }
+          $licenseFiles | ForEach-Object { Copy-Item $_.FullName "$bundle/THIRD-PARTY/WinSparkle-$($_.Name)" }
+          Get-ChildItem '.venv/Lib/site-packages' -Directory -Filter '*.dist-info' | ForEach-Object {
+            $name = $_.BaseName
+            Get-ChildItem $_.FullName -File -Recurse | Where-Object { $_.Name -match '^(copying|licen[cs]e|notice)' } | ForEach-Object {
+              Copy-Item $_.FullName "$bundle/THIRD-PARTY/$name-$($_.Name)"
+            }
+          }
+          if (Test-Path "$env:pythonLocation/LICENSE.txt") { Copy-Item "$env:pythonLocation/LICENSE.txt" "$bundle/THIRD-PARTY/Python.txt" }
+          $iscc = "${env:ProgramFiles(x86)}/Inno Setup 6/ISCC.exe"
+          if (!(Test-Path $iscc)) {
+            choco install innosetup -y --no-progress
+            if ($LASTEXITCODE -ne 0) { throw 'Inno Setup install failed' }
+          }
+          $output = Join-Path (Get-Location) 'dist/windows'
+          New-Item -ItemType Directory -Force $output | Out-Null
+          & $iscc "/DBundleDir=$bundle" "/DProductVersion=$env:VERSION" "/O$output" scripts/ugsync-setup.iss
+          if ($LASTEXITCODE -ne 0) { throw 'Inno Setup compilation failed' }
+          $setup = "UGSync-Setup-v$env:VERSION-x64.exe"
+          $hash = (Get-FileHash "$output/$setup" -Algorithm SHA256).Hash.ToLowerInvariant()
+          "$hash  $setup" | Set-Content -Encoding ascii "$output/$setup.sha256"
+          Write-Host "Windows installer SHA-256: $hash"
+      - name: Test installer, installed GUI and isolated Syncthing
+        shell: pwsh
+        run: |
+          $setup = "dist/windows/UGSync-Setup-v$env:VERSION-x64.exe"
+          $target = Join-Path $env:RUNNER_TEMP 'ugsync-install'
+          $install = Start-Process -FilePath $setup -ArgumentList '/VERYSILENT','/SUPPRESSMSGBOXES','/NORESTART','/SP-',"/DIR=`"$target`"" -PassThru
+          if (!$install.WaitForExit(120000)) { $install.Kill(); throw 'Installer timed out' }
+          if ($install.ExitCode -ne 0) { throw "Installer returned $($install.ExitCode)" }
+          Remove-Item Env:QT_QPA_PLATFORM
+          $app = Start-Process -FilePath "$target/UGSync-Syncthing-Selector.exe" -ArgumentList '--startup-check' -PassThru
+          if (!$app.WaitForExit(45000)) { $app.Kill(); throw 'Desktop startup check timed out' }
+          if ($app.ExitCode -ne 0) { throw "Desktop startup check returned $($app.ExitCode)" }
+          $env:QT_QPA_PLATFORM = 'offscreen'
+          .venv/Scripts/python.exe -B scripts/verify_syncthing_selection.py "$target/_internal/engine/syncthing.exe" --test-exit
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-x64
+          path: dist/windows/*
+          if-no-files-found: error
+  publish:
+    if: github.repository == 'qiuzhijin/UGSync-Syncthing-Selector'
+    needs: [ubuntu, windows]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 12
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          merge-multiple: true
+          path: release
+      - name: Check both packages and publish one prerelease
+        working-directory: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          test "$(find . -maxdepth 1 -type f | wc -l)" -eq 4
+          windows="UGSync-Setup-v${VERSION}-x64.exe"
+          ubuntu="ugsync-selector_${VERSION}_amd64.deb"
+          sha256sum --ignore-missing --check "$windows.sha256" "$ubuntu.sha256"
+          cat > "$RUNNER_TEMP/release-notes.md" <<'NOTES'
+          托盘面板现在汇总本机所有同步任务。顶部显示本机状态和传输速率，下面用一条列表显示文件动态，每条标明所属任务。
+
+          | 平台 | 已验收 | 未验证 |
+          | --- | --- | --- |
+          | Windows x64 | Windows Server 2025 CI 应用测试、Inno Setup 全新安装、已安装 GUI 启动、隔离 Syncthing 扫描和退出测试 | Windows 10/11 实机托盘交互、从旧版升级、WinSparkle 更新流程、真实 NAS 同步 |
+          | Ubuntu 24.04 amd64 | DEB 校验、从 0.1.45 APT 升级、Xvfb GUI 启动、隔离 Syncthing 扫描和退出测试 | 实体桌面鼠标交互、真实 NAS 同步 |
+
+          两个平台均可在下方手动下载安装包及对应的 SHA-256 校验文件。Windows 预览安装包未签署 Authenticode。此版本暂未进入 WinSparkle 自动更新渠道。
+          NOTES
+          printf '\n验收日志 <https://github.com/%s/actions/runs/%s>\n' "$GH_REPO" "$GITHUB_RUN_ID" >> "$RUNNER_TEMP/release-notes.md"
+          gh release create "v$VERSION" --draft --prerelease --target "$SOURCE_SHA" \
+            --title "UGSync v$VERSION Preview" --notes-file "$RUNNER_TEMP/release-notes.md" \
+            "$windows" "$windows.sha256" "$ubuntu" "$ubuntu.sha256"
+          test "$(gh release view "v$VERSION" --json assets --jq '.assets | length')" -eq 4
+          gh release edit "v$VERSION" --draft=false
