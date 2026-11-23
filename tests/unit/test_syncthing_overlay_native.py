@@ -37,8 +37,10 @@ def test_overlay_install_quotes_script_path_with_spaces(monkeypatch, tmp_path):
 
 
 @pytest.mark.skipif(sys.platform != 'win32', reason='Windows registry')
+@pytest.mark.parametrize('leading_space', [' ', ''])
 @pytest.mark.parametrize('green', [None, '{INVALID}', '{A22F0822-2B78-49CE-B27C-1041D875B011}'])
-def test_overlay_detection_requires_explorer_handlers_even_when_dll_exists(tmp_path, monkeypatch, green):
+def test_overlay_detection_requires_explorer_handlers_even_when_dll_exists(
+        tmp_path, monkeypatch, green, leading_space):
     import winreg
 
     dll = tmp_path / 'Overlay.dll'
@@ -50,7 +52,7 @@ def test_overlay_detection_requires_explorer_handlers_even_when_dll_exists(tmp_p
     values = {f'SOFTWARE\\Classes\\CLSID\\{clsid}\\InprocServer32': str(dll) for clsid in ids}
     for color, value in zip(('Blue', 'Green', 'Red'), (ids[0], green, ids[2])):
         if value is not None:
-            values[f'{prefix}\\ 08UGSync {color}'] = value
+            values[f'{prefix}\\{leading_space}08UGSync {color}'] = value
 
     def open_key(root, subkey, *args):
         if subkey not in values:

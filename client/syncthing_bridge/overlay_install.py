@@ -23,8 +23,14 @@ def overlay_extension_installed():
     try:
         import winreg
         for color, identifier in zip(('Blue', 'Green', 'Red'), _IDS):
-            with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f'{_EXPLORER_OVERLAYS}\\ 08UGSync {color}') as key:
-                registered, _ = winreg.QueryValueEx(key, None)
+            name = f'08UGSync {color}'
+            try:
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f'{_EXPLORER_OVERLAYS}\\ {name}')
+            except FileNotFoundError:
+                # Some installations have the same handler registered without the leading space.
+                key = winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE, f'{_EXPLORER_OVERLAYS}\\{name}')
+            with key as entry:
+                registered, _ = winreg.QueryValueEx(entry, None)
             if not isinstance(registered, str) or registered.casefold() != identifier.casefold():
                 return False
             with winreg.OpenKey(winreg.HKEY_LOCAL_MACHINE,

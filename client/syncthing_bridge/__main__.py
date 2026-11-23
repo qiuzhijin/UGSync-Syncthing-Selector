@@ -2,6 +2,7 @@
 import os
 import sys
 from collections import deque
+from contextlib import closing
 from pathlib import Path
 from time import time
 from shiboken6 import isValid
@@ -11,7 +12,7 @@ from PySide6.QtGui import QDesktopServices
 from PySide6.QtNetwork import QNetworkInformation
 from PySide6.QtWidgets import (QApplication, QCheckBox, QComboBox, QDialog, QSystemTrayIcon, QMenu, QStyle,
     QDialogButtonBox, QFormLayout, QFrame, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QProgressBar,
-    QMessageBox, QPushButton, QTabWidget, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
+    QMessageBox, QPushButton, QScrollArea, QTabWidget, QTextEdit, QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
 
 from syncthing_bridge.api import Syncthing, SyncthingError, SyncthingTimeout, local_credentials
 from syncthing_bridge.catalog import Catalog
@@ -21,7 +22,8 @@ from syncthing_bridge.desktop import startup_enabled, set_startup, engine_availa
 from syncthing_bridge.diagnostics import application_log, report_exception
 from syncthing_bridge.instance import SingleInstance
 from syncthing_bridge.progress import ProgressDisplay
-from syncthing_bridge.activity import ActivityPanel, ReadActivity, ReadLoginEngine, ReadNasDirectories, ReadProgress
+from syncthing_bridge.activity import (ActivityPanel, ReadActivity, ReadLoginEngine, ReadNasDirectories,
+                                       ReadProgress, ReadSelectionData)
 from syncthing_bridge.overlays import OverlayPublisher
 from syncthing_bridge.nas_credentials import NasCredentialError, NasCredentialStore
 from syncthing_bridge.overlay_install import OverlayInstallError, install_overlay_extension, overlay_extension_installed
@@ -50,15 +52,14 @@ class Window(QMainWindow):
         self.engine_credentials = None
         self.incomplete_directories = set()
         self.cached_directories = set()
+        self.live_catalog_directories = set()
         self.catalog_refresh_due = None
         self.catalog_refresh_queue = deque()
         self.catalog_last_poll = None
-        try:
-            self.catalog = Catalog.from_environment()
-        except (KeyError, ValueError) as error:
-            report_exception('catalog_configuration', error)
-            self.catalog = None
+        self.catalog = None
         self.nas_directory_jobs = {}
+        self.selection_jobs = {}
+        self.folder_details = {}
         self.loading_directories = set()
         self.activity_worker = None
         self.activity_context = None
@@ -69,6 +70,17 @@ class Window(QMainWindow):
         self.overlay_preferences = QSettings('UGSync', 'ExplorerOverlays')
         self.nas_preferences = QSettings('UGSync', 'SyncthingNasActivity')
         self.nas_credentials = NasCredentialStore()
+        self.catalog_preferences = QSettings('UGSync', 'NasCatalog')
+        self.catalog_credentials = NasCredentialStore(path=Catalog.cache_path().with_name('catalog-credentials.json'))
+        try:
+            if self.catalog_preferences.contains('endpoint'):
+                endpoint = self.catalog_preferences.value('endpoint', '', type=str)
+                if endpoint:
+                    self.catalog = Catalog(endpoint, self.catalog_credentials.load(endpoint) or '', Catalog.cache_path())
+            else:
+                self.catalog = Catalog.from_environment()
+        except (KeyError, ValueError, NasCredentialError) as error:
+            report_exception('catalog_configuration', error)
         self.setWindowTitle('文件夹同步 · Syncthing')
         self.resize(900, 720)
         body = QWidget()
@@ -83,8 +95,11 @@ class Window(QMainWindow):
         self.main_tabs = QTabWidget()
         directory_page = QWidget()
         settings_page = QWidget()
+        settings_scroll = QScrollArea()
+        settings_scroll.setWidgetResizable(True)
+        settings_scroll.setWidget(settings_page)
         self.main_tabs.addTab(directory_page, '目录选择')
-        self.main_tabs.addTab(settings_page, '设置')
+        self.main_tabs.addTab(settings_scroll, '设置')
         shell_layout.addWidget(self.main_tabs, 1)
         settings_layout = QVBoxLayout(settings_page)
         settings_layout.setContentsMargins(0, 6, 0, 0)
@@ -123,6 +138,33 @@ class Window(QMainWindow):
         connection_actions.addStretch()
         connection_layout.addLayout(connection_actions)
         settings_layout.addWidget(connection)
+        catalog_panel = QFrame()
+        catalog_panel.setProperty('card', True)
+        catalog_layout = QVBoxLayout(catalog_panel)
+        catalog_title = QLabel('NAS 目录服务（可选）')
+        catalog_title.setProperty('role', 'section')
+        catalog_layout.addWidget(catalog_title)
+        catalog_form = QFormLayout()
+        self.catalog_endpoint = QLineEdit(self.catalog.endpoint if self.catalog else '')
+        self.catalog_endpoint.setPlaceholderText('https://catalog.example.com')
+        self.catalog_token = QLineEdit(self.catalog.token if self.catalog else '')
+        self.catalog_token.setEchoMode(QLineEdit.EchoMode.Password)
+        catalog_form.addRow('目录服务地址', self.catalog_endpoint)
+        catalog_form.addRow('目录服务令牌', self.catalog_token)
+        catalog_layout.addLayout(catalog_form)
+        self.catalog_apply = QPushButton('测试并启用')
+        self.catalog_apply.clicked.connect(lambda: self.run(self.test_catalog_connection, 'test_catalog'))
+        catalog_disable = QPushButton('停用目录服务')
+        catalog_disable.clicked.connect(lambda: self.run(lambda: self.set_catalog(None), 'disable_catalog'))
+        catalog_actions = QHBoxLayout()
+        catalog_actions.addWidget(self.catalog_apply)
+        catalog_actions.addWidget(catalog_disable)
+        catalog_actions.addStretch()
+        catalog_layout.addLayout(catalog_actions)
+        self.catalog_notice = QLabel('当前已启用目录服务。' if self.catalog else '请先连接 Syncthing 并选择要测试的任务。')
+        self.catalog_notice.setWordWrap(True)
+        catalog_layout.addWidget(self.catalog_notice)
+        settings_layout.addWidget(catalog_panel)
         self.autostart = QCheckBox('登录 Windows 后自动启动并收起到右下角托盘')
         try:
             self.autostart.setChecked(startup_enabled())
@@ -207,7 +249,7 @@ class Window(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self.poll_status)
         self.timer.start(5000)
-        if self.catalog and QNetworkInformation.loadDefaultBackend():
+        if QNetworkInformation.loadDefaultBackend():
             QNetworkInformation.instance().reachabilityChanged.connect(self.catalog_reachability_changed)
         self.main_tabs.currentChanged.connect(lambda _: self.catalog_connection_changed())
         self.tray = QSystemTrayIcon(self.style().standardIcon(QStyle.StandardPixmap.SP_ComputerIcon), self)
@@ -234,6 +276,55 @@ class Window(QMainWindow):
         elif reason == QSystemTrayIcon.ActivationReason.DoubleClick:
             self.activity_panel.hide()
             self.show_window()
+
+    def test_catalog_connection(self):
+        folder = self.folders.currentData()
+        if not folder:
+            self.catalog_notice.setText('请先连接 Syncthing 并选择要测试的任务。')
+            return
+        endpoint, token = self.catalog_endpoint.text().strip(), self.catalog_token.text().strip()
+        catalog = Catalog(endpoint, token, Catalog.cache_path())
+        self.catalog_apply.setEnabled(False)
+        self.catalog_notice.setText('正在测试连接并读取此任务的根目录…')
+
+        def success(_result):
+            if (endpoint, token) != (self.catalog_endpoint.text().strip(), self.catalog_token.text().strip()):
+                self.catalog_notice.setText('设置已更改，请重新测试。')
+                return
+            self.set_catalog(catalog)
+
+        def failed(_error):
+            self.catalog_notice.setText('连接测试失败。请检查地址、HTTPS 证书、令牌及 NAS 文件夹 ID。')
+
+        self.run_selection_read(lambda: catalog.listings(folder, ('',), directories_only=True),
+                                success, 'test_catalog', failed=failed, final=self.catalog_apply)
+
+    def set_catalog(self, catalog):
+        if self.loading_directories or self.nas_directory_jobs or not self.preview_button.isEnabled():
+            self.catalog_notice.setText('目录正在读取，请稍后重试。')
+            return
+        endpoint = catalog.endpoint if catalog else ''
+        if catalog:
+            self.catalog_credentials.save(endpoint, catalog.token)
+        else:
+            if self.catalog:
+                self.catalog_credentials.delete(self.catalog.endpoint)
+            self.catalog_endpoint.clear()
+            self.catalog_token.clear()
+        self.catalog_preferences.setValue('endpoint', endpoint)
+        self.catalog = catalog
+        self.cached_directories.clear()
+        self.live_catalog_directories.clear()
+        self.incomplete_directories.clear()
+        self.catalog_refresh_queue.clear()
+        self.catalog_refresh_due = None
+        self.catalog_notice.setText('连接成功，目录服务已启用。' if catalog else '目录服务已停用。')
+        if self.api and self.folders.currentData() and not self.selection_needs_load:
+            current = self.folder_details.get(self.folders.currentData(), {})
+            if not current.get('paused'):
+                self.catalog_refresh_due = time() + 60 if catalog else None
+                self.populate(None, '', self.all.isChecked())
+        self.update_directory_notice()
 
     def restore_nas_connection(self):
         endpoint = self.nas_preferences.value('endpoint', '', type=str).strip()
@@ -606,13 +697,17 @@ class Window(QMainWindow):
 
     def connect_engine(self):
         credentials = (self.endpoint.text().strip(), self.key.text().strip())
-        api = Syncthing(*credentials)
-        try:
-            rows = api.folders()
-        except Exception:
-            api.close()
-            raise
-        self.set_engine_connection(api, credentials, rows)
+        self.status.setText('正在连接同步引擎…')
+
+        def read():
+            with closing(Syncthing(*credentials)) as api:
+                return api.folders()
+
+        def connected(rows):
+            if credentials == (self.endpoint.text().strip(), self.key.text().strip()):
+                self.set_engine_connection(Syncthing(*credentials), credentials, rows)
+
+        self.run_selection_read(read, connected, 'connect_engine')
 
     def set_engine_connection(self, api, credentials, rows, *, load_selection=True):
         self.startup_connection = False
@@ -621,6 +716,7 @@ class Window(QMainWindow):
             self.api.close()
         self.api = api
         self.engine_credentials = credentials
+        self.folder_details = {row['id']: row for row in rows}
         self.folders.blockSignals(True)
         self.folders.clear()
         for row in rows:
@@ -642,6 +738,7 @@ class Window(QMainWindow):
         self.loading_directories.clear()
         self.incomplete_directories.clear()
         self.cached_directories.clear()
+        self.live_catalog_directories.clear()
         self.catalog_refresh_due = None
         self.catalog_refresh_queue.clear()
         self.set_preview_busy(False)
@@ -652,12 +749,18 @@ class Window(QMainWindow):
         folder = self.folders.currentData()
         if not self.api or not folder:
             return
-        self.previous = self.api.ignores(folder)
+        def read(api):
+            return api.ignores(folder), next(row for row in api.folders() if row['id'] == folder)
+
+        self.read_local_selection(read, self.apply_folder_selection, 'load_folder')
+
+    def apply_folder_selection(self, result):
+        self.previous, current = result
+        self.folder_details[current['id']] = current
         self.base_rules, entire, self.choices, self.escape = parse_document(self.previous)
         self.all.blockSignals(True)
         self.all.setChecked(entire)
         self.all.blockSignals(False)
-        current = next(row for row in self.api.folders() if row['id'] == folder)
         if current.get('paused'):
             self.status.setText('此任务已暂停，Syncthing 暂不提供目录树。恢复任务后重新连接可编辑已有范围；保存选择时会自动暂停。')
             return
@@ -667,6 +770,47 @@ class Window(QMainWindow):
         self.status.setText('已恢复目录选择，现有排除规则会保留。保存后可点击“继续同步”。')
         self.refresh_status()
 
+    def read_local_selection(self, read, callback, operation, *, failed=None):
+        if self.engine_credentials is None:
+            try:
+                result = read(self.api)
+            except Exception as error:
+                if failed is None:
+                    raise
+                failed(error)
+            else:
+                callback(result)
+            return
+        credentials = self.engine_credentials
+
+        def work():
+            with closing(Syncthing(*credentials)) as api:
+                return read(api)
+
+        self.run_selection_read(work, callback, operation, failed=failed)
+
+    def run_selection_read(self, work, callback, operation, *, failed=None, final=None):
+        worker = ReadSelectionData(work)
+        self.selection_jobs[worker] = (self.progress_display, callback, operation, failed, final)
+        worker.signals.ready.connect(self.selection_read_ready)
+        QThreadPool.globalInstance().start(worker)
+
+    @Slot(object, object)
+    def selection_read_ready(self, worker, outcome):
+        context, callback, operation, failed, final = self.selection_jobs.pop(worker)
+        if final is not None and not self.exiting:
+            final.setEnabled(True)
+        if self.exiting or context is not self.progress_display:
+            return
+        result, error = outcome
+        if error is None:
+            self.run(lambda: callback(result), operation)
+        elif failed is not None:
+            self.run(lambda: failed(error), operation)
+        else:
+            report_exception(operation, error)
+            self.status.setText(str(error))
+
     def update_directory_notice(self):
         message = ('NAS 目录清单不完整，当前有目录只显示本机索引。可重新展开相应目录，'
                    '或在设置中重新连接以重读根目录。')
@@ -674,9 +818,15 @@ class Window(QMainWindow):
             message = ('当前有目录使用上次成功读取的清单。正在后台更新…' if self.loading_directories else
                        '部分目录显示上次成功读取的清单，程序会自动重试。')
         elif self.loading_directories:
-            message = '正在读取 NAS 目录清单…'
+            message = '正在读取目录清单…'
         elif not self.incomplete_directories:
-            message = ''
+            if self.live_catalog_directories:
+                message = '目录来源：NAS 实时清单与本机磁盘。'
+            elif self.tree.topLevelItemCount() and not self.catalog:
+                message = ('目录来源：NAS 与本机 Syncthing 索引。' if all(self.nas_directory_credentials())
+                           else '目录来源：本机 Syncthing 索引。')
+            else:
+                message = ''
         self.directory_notice.setText(message)
         self.directory_notice.setVisible(bool(message))
 
@@ -689,7 +839,9 @@ class Window(QMainWindow):
         if self.catalog is None:
             if not all(credentials):
                 return False
-            task = next((row for row in self.api.folders() if row['id'] == folder), None)
+            task = self.folder_details.get(folder)
+            if task is None and self.engine_credentials is None:
+                task = next((row for row in self.api.folders() if row['id'] == folder), None)
             peers = {device['deviceID'] for device in (task or {}).get('devices', [])}
             if not peers:
                 return False
@@ -710,29 +862,6 @@ class Window(QMainWindow):
             rows, error = None, SyncthingError('NAS 设置已更改，请重试')
         self.run(lambda: callback(rows, error), 'read_nas_directory_result')
 
-    def selection_rows(self, folder, prefix, *, directories_only=True, nas_rows=None):
-        incomplete = bool(self.catalog or any(self.nas_directory_credentials())) and nas_rows is None
-        local_error = None
-        try:
-            local_rows = self.api.browse(folder, prefix) if directories_only else self.api.browse(
-                folder, prefix, directories_only=False)
-        except SyncthingError as error:
-            local_error = error
-            local_rows = []
-
-        if directories_only:
-            if incomplete:
-                self.incomplete_directories.add(prefix)
-            else:
-                self.incomplete_directories.discard(prefix)
-            self.update_directory_notice()
-        if local_error is not None and nas_rows is None:
-            raise local_error
-
-        rows = {(row['name'].casefold(), row.get('type')): row for row in nas_rows or []}
-        rows.update({(row['name'].casefold(), row.get('type')): row for row in local_rows})
-        return [rows[key] for key in sorted(rows, key=lambda item: item[0])]
-
     def populate(self, parent, prefix, checked, *, refresh=False, requested_at=None):
         if prefix in self.loading_directories:
             return
@@ -743,36 +872,96 @@ class Window(QMainWindow):
             self.incomplete_directories.add(prefix)
             self.populate_rows(parent, prefix, cached)
 
-        def complete(nas, error):
+        def parent_exists():
+            return parent is None or (isValid(parent) and parent.treeWidget() is self.tree)
+
+        def finish(rows, *, live=False, incomplete=False, from_cache=False):
             self.loading_directories.discard(prefix)
-            if parent is not None and (not isValid(parent) or parent.treeWidget() is not self.tree):
-                self.cached_directories.discard(prefix)
-                self.update_directory_notice()
+            self.cached_directories.discard(prefix)
+            self.live_catalog_directories.discard(prefix)
+            self.incomplete_directories.discard(prefix)
+            if parent_exists():
+                if live:
+                    self.live_catalog_directories.add(prefix)
+                if incomplete:
+                    self.incomplete_directories.add(prefix)
+                if from_cache:
+                    self.cached_directories.add(prefix)
+                if rows is not None:
+                    self.populate_rows(parent, prefix, rows)
+            self.update_directory_notice()
+
+        def complete(nas, error):
+            if not parent_exists():
+                finish(None)
                 return
             if nas is None and refresh:
+                self.loading_directories.discard(prefix)
                 if not prefix and self.catalog_refresh_due != 0:
                     self.catalog_refresh_due = requested_at + 15
                 self.cached_directories.add(prefix)
                 self.update_directory_notice()
                 return
-            if nas is None and cached is not None:
-                self.update_directory_notice()
-                return
-            self.cached_directories.discard(prefix)
-            if self.catalog and nas is not None:
-                self.incomplete_directories.discard(prefix)
-                rows = nas[prefix]
-                self.update_directory_notice()
-            else:
-                rows = self.selection_rows(folder, prefix, nas_rows=None if nas is None else nas[prefix])
-            self.populate_rows(parent, prefix, rows)
+            live = self.catalog is not None and nas is not None
+            incomplete = nas is None and bool(self.catalog or any(self.nas_directory_credentials()))
+            from_cache = nas is None and cached is not None
+            remote_rows = (cached or []) if nas is None else nas[prefix]
+            config = self.folder_details.get(folder)
 
+            def read(api):
+                if not (live or from_cache):
+                    return api.browse(folder, prefix)
+                details = config
+                if details is None and hasattr(api, 'folders'):
+                    details = next((row for row in api.folders() if row['id'] == folder), None)
+                return self.local_disk_directories(details, prefix)
+
+            def show(local_rows):
+                rows = {row['name'].casefold(): row for row in remote_rows + local_rows}
+                finish([rows[name] for name in sorted(rows)], live=live, incomplete=incomplete, from_cache=from_cache)
+
+            def failed(local_error):
+                finish(remote_rows if nas is not None or from_cache else None, live=live,
+                       incomplete=incomplete, from_cache=from_cache)
+                if nas is None and not from_cache:
+                    report_exception('browse_local_directory', local_error)
+                    self.status.setText(str(local_error))
+
+            self.read_local_selection(read, show, 'browse_local_directory', failed=failed)
+
+        self.loading_directories.add(prefix)
         if self.read_nas_directories(folder, (prefix,), complete, directories_only=True):
-            self.loading_directories.add(prefix)
             if not refresh:
                 self.update_directory_notice()
         else:
             complete(None, None)
+
+    @staticmethod
+    def local_disk_directories(config, prefix):
+        if not config or not config.get('path'):
+            return []
+        path = Path(os.path.expandvars(config['path'])).expanduser()
+        for component in prefix.split('/') if prefix else ():
+            path /= component
+            if path.is_symlink() or path.is_junction():
+                return []
+        rows = []
+        try:
+            with os.scandir(path) as entries:
+                for entry in entries:
+                    name = entry.name
+                    if name.casefold() in {'.stfolder', '.stversions'} or not entry.is_dir(follow_symlinks=False):
+                        continue
+                    if Path(entry.path).is_junction():
+                        continue
+                    try:
+                        normalize(name)
+                    except ValueError:
+                        continue
+                    rows.append({'name': name, 'type': 'FILE_INFO_TYPE_DIRECTORY'})
+        except (FileNotFoundError, NotADirectoryError):
+            return []
+        return rows
 
     def populate_rows(self, parent, prefix, rows):
         container = self.tree.invisibleRootItem() if parent is None else parent
@@ -809,7 +998,7 @@ class Window(QMainWindow):
                     parent.addChild(item)
             for path, item in existing.items():
                 container.removeChild(item)
-                for pending in (self.cached_directories, self.incomplete_directories):
+                for pending in (self.cached_directories, self.incomplete_directories, self.live_catalog_directories):
                     pending.difference_update({name for name in pending
                                                if name == path or name.startswith(path + '/')})
             if existing:
@@ -877,7 +1066,7 @@ class Window(QMainWindow):
 
     def set_preview_busy(self, busy):
         self.preview_button.setEnabled(not busy)
-        self.preview_button.setText('正在核对 NAS 文件…' if busy else '预览并保存选择')
+        self.preview_button.setText('正在核对直属文件…' if busy else '预览并保存选择')
 
     def preview(self):
         if not self.preview_button.isEnabled():
@@ -894,32 +1083,48 @@ class Window(QMainWindow):
         parents = direct_file_parents(included, excluded, entire)
 
         def complete(nas, _error):
-            self.set_preview_busy(False)
-            if self.choices != choices or self.all.isChecked() != entire:
-                raise SyncthingError('目录勾选已更改，请重新预览。')
-            self.show_selection_preview(folder, included, excluded, entire, parents, nas or {})
+            local_only = bool(parents and not nas and (self.catalog or any(self.nas_directory_credentials())))
+            catalog_used = bool(parents and nas and self.catalog)
+            prior = saved_direct_files(self.previous, self.escape) if local_only or catalog_used else []
 
-        if parents and self.read_nas_directories(folder, parents, complete, directories_only=False):
-            self.set_preview_busy(True)
-        else:
+            def show(direct_files):
+                self.set_preview_busy(False)
+                if self.choices != choices or self.all.isChecked() != entire:
+                    raise SyncthingError('目录勾选已更改，请重新预览。')
+                self.show_selection_preview(included, excluded, entire, direct_files, local_only, catalog_used)
+
+            def failed(error):
+                self.set_preview_busy(False)
+                raise error
+
+            if parents:
+                self.read_local_selection(
+                    lambda api: self.read_direct_files(api, folder, parents, nas or {}, prior, local_only),
+                    show, 'preview_direct_files', failed=failed)
+            else:
+                show([])
+
+        self.set_preview_busy(True)
+        if not parents or not self.read_nas_directories(folder, parents, complete, directories_only=False):
             complete(None, None)
 
-    def show_selection_preview(self, folder, included, excluded, entire, parents, nas):
+    @staticmethod
+    def read_direct_files(api, folder, parents, nas, prior_files, local_only):
         direct_files = []
-        local_only = bool(parents and not nas and (self.catalog or any(self.nas_directory_credentials())))
-        catalog_used = bool(parents and nas and self.catalog)
-        prior_files = saved_direct_files(self.previous, self.escape) if local_only or catalog_used else []
         if parents:
-            config = next(row for row in self.api.folders() if row['id'] == folder)
+            config = next(row for row in api.folders() if row['id'] == folder)
             root = Path(os.path.expandvars(config['path'])).expanduser()
             for parent in parents:
                 local = root / parent
                 try:
-                    rows = self.selection_rows(folder, parent, directories_only=False, nas_rows=nas.get(parent))
+                    rows = api.browse(folder, parent, directories_only=False)
                 except SyncthingError as error:
                     if local_only:
                         raise SyncthingError(f'NAS 清单未能核对，本机目录也无法读取：{error}。勾选已保留。') from None
-                    raise
+                    if parent not in nas:
+                        raise
+                    rows = []
+                rows = rows + nas.get(parent, [])
                 directory_names = {row['name'].casefold() for row in rows
                                    if row.get('type') == 'FILE_INFO_TYPE_DIRECTORY'}
                 names = {row['name'] for row in rows if row.get('type') == 'FILE_INFO_TYPE_FILE'}
@@ -934,6 +1139,9 @@ class Window(QMainWindow):
                                     if name.casefold() not in directory_names
                                     and name.casefold() not in {'.stignore', '.stfolder', '.stversions'}
                                     and not name.casefold().startswith(('.syncthing.', '~syncthing~')))
+        return direct_files
+
+    def show_selection_preview(self, included, excluded, entire, direct_files, local_only, catalog_used):
         rules = compile_document(self.base_rules, included, excluded,
                                  entire_root=entire, escape=self.escape,
                                  direct_files=direct_files)

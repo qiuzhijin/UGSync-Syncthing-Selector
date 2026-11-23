@@ -16,6 +16,21 @@ class Result(QObject):
     ready = Signal(object, object)
 
 
+class ReadSelectionData(QRunnable):
+    def __init__(self, read):
+        super().__init__()
+        self.read = read
+        self.signals = Result()
+
+    def run(self):
+        try:
+            result = self.read()
+        except Exception as error:
+            self.signals.ready.emit(self, (None, error))
+        else:
+            self.signals.ready.emit(self, (result, None))
+
+
 class ReadLoginEngine(QRunnable):
     def __init__(self):
         super().__init__()

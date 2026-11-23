@@ -37,8 +37,11 @@ class Catalog:
         endpoint = os.environ.get('UGSYNC_CATALOG_URL', '').strip()
         if not endpoint:
             return None
-        path = Path(os.environ['LOCALAPPDATA']) / 'UGSync' / 'catalog-cache.sqlite'
-        return cls(endpoint, os.environ.get('UGSYNC_CATALOG_TOKEN', ''), path)
+        return cls(endpoint, os.environ.get('UGSYNC_CATALOG_TOKEN', ''), cls.cache_path())
+
+    @staticmethod
+    def cache_path():
+        return Path(os.environ['LOCALAPPDATA']) / 'UGSync' / 'catalog-cache.sqlite'
 
     def cache_key(self, folder, prefix):
         data = json.dumps([self.endpoint, self.token, folder, prefix])

@@ -12,7 +12,7 @@ from syncthing_bridge.activity import ReadActivity
 def isolate_saved_nas_credentials(monkeypatch):
     import syncthing_bridge.__main__ as ui
 
-    monkeypatch.setattr(ui, 'NasCredentialStore', lambda: SimpleNamespace(load=lambda endpoint: None))
+    monkeypatch.setattr(ui, 'NasCredentialStore', lambda **kwargs: SimpleNamespace(load=lambda endpoint: None))
 
 
 def test_directory_page_is_default_and_keeps_selection_when_switching_tabs():
@@ -209,6 +209,69 @@ def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, i
         window.close()
 
 
+def test_catalog_keeps_local_only_directories(monkeypatch, tmp_path):
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    directory = 'FILE_INFO_TYPE_DIRECTORY'
+    (tmp_path / 'LocalOnly').mkdir()
+    window.catalog = SimpleNamespace(cached=lambda folder, prefix: None)
+    window.api = SimpleNamespace(close=lambda: None, folders=lambda: [{'id': 'test', 'path': str(tmp_path)}])
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    callbacks = []
+    monkeypatch.setattr(window, 'read_nas_directories', lambda *args, **kwargs:
+                        callbacks.append(args[2]) or True)
+    try:
+        window.populate(None, '', False)
+        callbacks.pop()({'': [{'name': 'NasOnly', 'type': directory}]}, None)
+        assert {window.tree.topLevelItem(i).text(0) for i in range(window.tree.topLevelItemCount())} == {
+            'LocalOnly', 'NasOnly'}
+    finally:
+        window.exiting = True
+        window.close()
+
+
+def test_slow_local_browse_is_dispatched_off_the_gui_thread(monkeypatch):
+    from threading import Event
+    from PySide6.QtTest import QTest
+    import syncthing_bridge.__main__ as ui
+
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    finished = Event()
+    released = Event()
+
+    class Engine:
+        def browse(self, folder, prefix):
+            released.wait(1)
+            finished.set()
+            return [{'name': 'Local', 'type': 'FILE_INFO_TYPE_DIRECTORY'}]
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ui, 'Syncthing', lambda *_: Engine())
+    window.api = Engine()
+    window.engine_credentials = ('http://127.0.0.1:8384', 'test')
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    try:
+        window.populate(None, '', False)
+        assert not finished.is_set()
+        released.set()
+        for _ in range(100):
+            if window.tree.topLevelItemCount():
+                break
+            QTest.qWait(10)
+        assert window.tree.topLevelItem(0).text(0) == 'Local'
+    finally:
+        released.set()
+        window.exiting = True
+        window.close()
+
+
 def test_catalog_cache_refresh_keeps_directory_selection(monkeypatch):
     app = QApplication.instance() or QApplication([])
     window = Window()
@@ -301,6 +364,105 @@ def test_catalog_automatically_refreshes_visible_tree_and_recovers(monkeypatch):
         complete({'': [work]}, None)
         assert '' not in window.cached_directories
     finally:
+        window.exiting = True
+        window.close()
+
+
+def test_catalog_settings_only_persist_after_a_successful_connection(monkeypatch):
+    import syncthing_bridge.__main__ as ui
+    from PySide6.QtTest import QTest
+
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    preferences, saved, attempts = {}, {}, []
+    window.catalog_preferences = SimpleNamespace(setValue=preferences.__setitem__)
+    window.catalog_credentials = SimpleNamespace(save=saved.__setitem__, delete=saved.pop)
+    window.folders.blockSignals(True)
+    window.folders.addItem('测试', 'test')
+    window.folders.blockSignals(False)
+    window.catalog_endpoint.setText('https://catalog.invalid')
+    window.catalog_token.setText('t' * 32)
+
+    def listings(catalog, folder, prefixes, *, directories_only):
+        attempts.append((folder, prefixes, directories_only))
+        if len(attempts) == 1:
+            raise ui.SyncthingError('test failure')
+        return {'': []}
+
+    monkeypatch.setattr(ui.Catalog, 'listings', listings)
+    try:
+        assert window.catalog_token.echoMode() == QLineEdit.EchoMode.Password
+        for _ in range(2):
+            window.catalog_apply.click()
+            assert not window.catalog_apply.isEnabled()
+            for _ in range(100):
+                if window.catalog_apply.isEnabled():
+                    break
+                QTest.qWait(10)
+            assert window.catalog_apply.isEnabled()
+            if len(attempts) == 1:
+                assert not preferences and not saved
+                assert '失败' in window.catalog_notice.text()
+        assert attempts == [('test', ('',), True)] * 2
+        assert preferences == {'endpoint': 'https://catalog.invalid'}
+        assert saved == {'https://catalog.invalid': 't' * 32}
+        window.set_catalog(None)
+        assert not saved and preferences == {'endpoint': ''}
+        assert window.catalog is None
+    finally:
+        window.exiting = True
+        window.close()
+
+
+def test_directory_read_result_is_discarded_after_switching_tasks(monkeypatch):
+    from threading import Event
+    from PySide6.QtTest import QTest
+    import syncthing_bridge.__main__ as ui
+
+    app = QApplication.instance() or QApplication([])
+    window = Window()
+    released = Event()
+
+    class Engine:
+        def browse(self, folder, prefix):
+            if folder == 'old':
+                released.wait(2)
+            return [{'name': folder, 'type': 'FILE_INFO_TYPE_DIRECTORY'}]
+
+        def folders(self):
+            return [{'id': 'old'}, {'id': 'new'}]
+
+        def ignores(self, folder):
+            return []
+
+        def close(self):
+            pass
+
+    monkeypatch.setattr(ui, 'Syncthing', lambda *_: Engine())
+    monkeypatch.setattr(window, 'refresh_status', lambda: None)
+    window.api = Engine()
+    window.engine_credentials = ('http://127.0.0.1:8384', 'test')
+    window.folders.blockSignals(True)
+    window.folders.addItem('旧任务', 'old')
+    window.folders.addItem('新任务', 'new')
+    window.folders.blockSignals(False)
+    try:
+        window.populate(None, '', False)
+        window.folders.setCurrentIndex(1)
+        for _ in range(100):
+            if window.tree.topLevelItemCount():
+                break
+            QTest.qWait(10)
+        assert window.tree.topLevelItem(0).text(0) == 'new'
+        released.set()
+        for _ in range(100):
+            if not window.selection_jobs:
+                break
+            QTest.qWait(10)
+        assert not window.selection_jobs
+        assert window.tree.topLevelItem(0).text(0) == 'new'
+    finally:
+        released.set()
         window.exiting = True
         window.close()
 
@@ -601,11 +763,13 @@ def test_connect_engine_restores_overlays_without_installing(monkeypatch, instal
     app = QApplication.instance() or QApplication([])
     monkeypatch.setattr(ui, 'QSettings', lambda *args: SimpleNamespace(
         value=lambda key, default=None, **kwargs: key == 'enabled' or default,
+        contains=lambda key: False,
         setValue=lambda *args: None))
     window = Window()
     calls = []
     monkeypatch.setattr(ui.sys, 'platform', 'win32')
     monkeypatch.setattr(ui, 'Syncthing', lambda *args: SimpleNamespace(folders=list, close=lambda: None))
+    monkeypatch.setattr(window, 'run_selection_read', lambda read, callback, *_: callback(read()))
     monkeypatch.setattr(ui, 'overlay_extension_installed', lambda: installed)
     monkeypatch.setattr(ui, 'install_overlay_extension', lambda: calls.append('install') or True)
     monkeypatch.setattr(ui, 'OverlayPublisher', lambda *args: SimpleNamespace(
@@ -636,12 +800,16 @@ def test_selector_restores_saved_nas_connection(monkeypatch):
             self.values = {'endpoint': 'http://nas.invalid:8384'}
         def value(self, key, default=None, type=None):
             return self.values.get(key, default)
+        def contains(self, key):
+            return False
         def setValue(self, key, value):
             self.values[key] = value
         def remove(self, key):
             self.values.pop(key, None)
 
     class Store:
+        def __init__(self, **kwargs):
+            pass
         def load(self, endpoint):
             assert endpoint == 'http://nas.invalid:8384'
             return 'saved-nas-key'
