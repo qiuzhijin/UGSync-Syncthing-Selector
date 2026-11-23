@@ -7,12 +7,40 @@ from PySide6.QtCore import QObject, QRunnable, Qt, Signal
 from PySide6.QtWidgets import (QApplication, QFrame, QHBoxLayout, QLabel,
     QProgressBar, QPushButton, QTabWidget, QTreeWidget, QTreeWidgetItem, QVBoxLayout)
 
-from syncthing_bridge.api import Syncthing, SyncthingError, SyncthingTimeout
+from syncthing_bridge.api import Syncthing, SyncthingError, SyncthingTimeout, local_credentials
+from syncthing_bridge.desktop import engine_available
 from syncthing_bridge.diagnostics import report_exception
 
 
 class Result(QObject):
     ready = Signal(object, object)
+
+
+class ReadLoginEngine(QRunnable):
+    def __init__(self):
+        super().__init__()
+        self.signals = Result()
+
+    def run(self):
+        try:
+            result = self.read()
+        except Exception as error:
+            self.signals.ready.emit(None, error)
+        else:
+            self.signals.ready.emit(result, None)
+
+    def read(self):
+        try:
+            credentials = local_credentials()
+        except SyncthingError:
+            if engine_available('http://127.0.0.1:8384'):
+                raise
+            return None
+        if not engine_available(credentials[0]):
+            return None
+        with closing(Syncthing(*credentials)) as api:
+            api.http.timeout = httpx.Timeout(5)
+            return credentials, api.folders()
 
 
 class ReadNasDirectories(QRunnable):

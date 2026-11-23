@@ -17,7 +17,7 @@ from syncthing_bridge.desktop import startup_enabled, set_startup, engine_availa
 from syncthing_bridge.diagnostics import application_log, report_exception
 from syncthing_bridge.instance import SingleInstance
 from syncthing_bridge.progress import ProgressDisplay
-from syncthing_bridge.activity import ActivityPanel, ReadActivity, ReadNasDirectories, ReadProgress
+from syncthing_bridge.activity import ActivityPanel, ReadActivity, ReadLoginEngine, ReadNasDirectories, ReadProgress
 from syncthing_bridge.overlays import OverlayPublisher
 from syncthing_bridge.nas_credentials import NasCredentialError, NasCredentialStore
 from syncthing_bridge.overlay_install import OverlayInstallError, install_overlay_extension, overlay_extension_installed
@@ -36,6 +36,10 @@ class Window(QMainWindow):
         self.exiting = False
         self.starting = False
         self.startup_connection = False
+        self.login_worker = None
+        self.engine_process = None
+        self.login_misses = 0
+        self.selection_needs_load = False
         self.launch_checks = 0
         self.progress_display = ProgressDisplay()
         self.progress_worker = None
@@ -259,6 +263,8 @@ class Window(QMainWindow):
     def refresh_activity(self):
         folder = self.folders.currentData()
         if not self.api or not folder:
+            if self.startup_connection:
+                return
             self.activity_panel.display(None, '尚未连接同步任务，请打开设置连接本机。')
             return
         if self.activity_worker is not None:
@@ -294,6 +300,8 @@ class Window(QMainWindow):
         self.showNormal()
         self.raise_()
         self.activateWindow()
+        if self.selection_needs_load:
+            self.run(self.load_folder)
 
     def change_overlays(self, enabled, *, allow_install=False):
         if self.overlay_publisher:
@@ -376,7 +384,7 @@ class Window(QMainWindow):
             QMessageBox.warning(self, '设置未保存', '无法修改当前用户自启动设置')
 
     def connect_local(self):
-        if self.starting:
+        if self.starting or self.startup_connection:
             return
         try:
             endpoint, _ = local_credentials()
@@ -392,7 +400,7 @@ class Window(QMainWindow):
         self.finish_local_connection()
 
     def wait_for_engine(self):
-        if self.exiting:
+        if self.exiting or not self.starting:
             return
         self.launch_checks += 1
         try:
@@ -402,35 +410,66 @@ class Window(QMainWindow):
             ready = False
         if ready:
             self.starting = False
-            if self.startup_connection:
-                self.try_startup_connection(self.finish_local_connection)
-            else:
-                self.run(self.finish_local_connection)
+            self.run(self.finish_local_connection)
         elif self.launch_checks < 30 and self.engine_process.poll() is None:
             QTimer.singleShot(500, self.wait_for_engine)
         else:
             self.starting = False
-            self.startup_connection = False
             self.status.setText('同步引擎未能启动，请检查配置或端口占用。')
 
     def start_local_on_login(self):
         self.startup_connection = True
-        self.try_startup_connection(self.connect_local)
+        self.show_login_status('正在准备同步…')
+        self.probe_login_engine()
 
-    def try_startup_connection(self, action, retries=2):
+    def show_login_status(self, message):
+        self.status.setText(message)
+        self.tray.setToolTip('文件夹同步 · ' + message)
+        self.activity_panel.overview(None, message, '', self.folders.currentText())
+
+    def probe_login_engine(self):
+        if self.exiting or not self.startup_connection or self.login_worker is not None:
+            return
+        self.login_worker = ReadLoginEngine()
+        self.login_worker.signals.ready.connect(self.login_engine_ready)
+        QThreadPool.globalInstance().start(self.login_worker)
+
+    @Slot(object, object)
+    def login_engine_ready(self, result, error):
+        self.login_worker = None
         if self.exiting or not self.startup_connection:
             return
-        try:
-            action()
-        except Exception as error:
+        if result is not None:
+            credentials, rows = result
+            self.endpoint.setText(credentials[0])
+            self.key.setText(credentials[1])
+            self.show_login_status('本机同步引擎已就绪' if rows else '本机同步引擎已就绪，暂无同步任务')
+            self.set_engine_connection(Syncthing(*credentials), credentials, rows, load_selection=False)
+            if self.isVisible() and self.selection_needs_load:
+                try:
+                    self.load_folder()
+                except Exception as browse_error:
+                    report_exception('login_directory_selection', browse_error)
+                    self.status.setText('目录暂时无法读取，可在设置中重新连接。')
+            return
+        if error is not None:
+            self.login_misses = 0
             report_exception('login_startup', error)
-            if isinstance(error, SyncthingTimeout) and retries:
-                self.status.setText('同步引擎响应超时，稍后自动重试…')
-                QTimer.singleShot(5000, lambda: self.try_startup_connection(action, retries - 1))
+        else:
+            self.login_misses += 1
+            engine_running = self.engine_process is not None and self.engine_process.poll() is None
+            if self.login_misses >= 2 and not engine_running:
+                self.starting = False
+                try:
+                    self.engine_process = launch_engine()
+                    self.starting = True
+                except (OSError, RuntimeError) as launch_error:
+                    report_exception('login_launch_engine', launch_error)
+                self.show_login_status('正在等待本机同步引擎，稍后自动重试…')
+                QTimer.singleShot(15000, self.probe_login_engine)
                 return
-            self.status.setText(f'{error}。可点击“连接本机”重试。')
-        if not self.starting:
-            self.startup_connection = False
+        self.show_login_status('正在等待本机同步引擎，稍后自动重试…')
+        QTimer.singleShot(5000, self.probe_login_engine)
 
     def finish_local_connection(self):
         endpoint, key = local_credentials()
@@ -504,6 +543,11 @@ class Window(QMainWindow):
         except Exception:
             api.close()
             raise
+        self.set_engine_connection(api, credentials, rows)
+
+    def set_engine_connection(self, api, credentials, rows, *, load_selection=True):
+        self.startup_connection = False
+        self.starting = False
         if self.api:
             self.api.close()
         self.api = api
@@ -513,13 +557,18 @@ class Window(QMainWindow):
         for row in rows:
             self.folders.addItem(row.get('label') or row['id'], row['id'])
         self.folders.blockSignals(False)
+        self.selection_needs_load = bool(rows)
         try:
-            self.load_folder()
+            if load_selection:
+                self.load_folder()
         finally:
             if self.overlay_enabled.isChecked():
                 self.change_overlays(True)
+        if not load_selection:
+            self.refresh_status()
 
     def load_folder(self):
+        self.selection_needs_load = False
         self.tree.clear()
         self.loading_directories.clear()
         self.incomplete_directories.clear()
@@ -831,12 +880,11 @@ def main():
         try:
             window = Window(log_path=log_path)
             active_window.append(window)
-            window.show()
+            if '--autostart' not in sys.argv or '--startup-check' in sys.argv or not window.tray.isVisible():
+                window.show()
             if '--startup-check' in sys.argv:
                 QTimer.singleShot(200, app.quit)
             elif '--autostart' in sys.argv:
-                if window.tray.isVisible():
-                    window.hide()
                 QTimer.singleShot(0, window.start_local_on_login)
             else:
                 QTimer.singleShot(0, lambda: window.run(window.connect_local))

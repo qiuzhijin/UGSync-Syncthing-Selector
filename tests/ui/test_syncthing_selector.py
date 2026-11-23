@@ -333,22 +333,36 @@ def test_login_retries_timeout_without_modal(monkeypatch):
 
     app = QApplication.instance() or QApplication([])
     window = Window()
-    scheduled, attempts = [], []
-
-    def connect():
-        attempts.append(True)
-        raise SyncthingTimeout('读取同步引擎超时')
-
-    monkeypatch.setattr(window, 'connect_local', connect)
-    monkeypatch.setattr(ui.QTimer, 'singleShot', lambda delay, callback: scheduled.append(callback))
+    scheduled, workers, launches = [], [], []
+    monkeypatch.setattr(ui, 'QThreadPool', SimpleNamespace(
+        globalInstance=lambda: SimpleNamespace(start=workers.append)))
+    monkeypatch.setattr(ui.QTimer, 'singleShot', lambda delay, callback: scheduled.append((delay, callback)))
     monkeypatch.setattr(ui.QMessageBox, 'warning', lambda *args: pytest.fail('Unexpected startup dialog'))
+    monkeypatch.setattr(ui, 'launch_engine', lambda: launches.append(True) or SimpleNamespace(poll=lambda: None))
+    monkeypatch.setattr(ui, 'Syncthing', lambda *args: SimpleNamespace(close=lambda: None))
+    monkeypatch.setattr(window, 'load_folder', lambda: pytest.fail('Hidden startup should not browse directories'))
+    monkeypatch.setattr(window, 'change_overlays', lambda *args: None)
+    monkeypatch.setattr(window, 'refresh_status', lambda: None)
     try:
         window.start_local_on_login()
-        assert '稍后自动重试' in window.status.text()
-        scheduled.pop(0)()
-        scheduled.pop(0)()
-        assert not scheduled and len(attempts) == 3
-        assert not window.startup_connection and '连接本机' in window.status.text()
+        assert '准备' in window.tray.toolTip()
+        for _ in range(4):
+            workers.pop().signals.ready.emit(None, SyncthingTimeout('读取同步引擎超时'))
+            assert window.startup_connection and '重试' in window.tray.toolTip()
+            assert not launches and len(scheduled) == 1
+            scheduled.pop()[1]()
+        for _ in range(4):
+            workers.pop().signals.ready.emit(None, None)
+            scheduled.pop()[1]()
+        assert launches == [True]
+        workers.pop().signals.ready.emit(
+            (('http://127.0.0.1:8384', 'test'), [{'id': 'drive', 'label': 'Drive'}]), None)
+        assert not scheduled and not window.startup_connection
+        assert window.folders.currentData() == 'drive' and window.selection_needs_load
+        loads = []
+        monkeypatch.setattr(window, 'load_folder', lambda: loads.append(True))
+        window.show_window()
+        assert loads == [True]
     finally:
         window.exiting = True
         window.close()
