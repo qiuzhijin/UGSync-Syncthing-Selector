@@ -930,7 +930,7 @@ class Window(QMainWindow):
                 return self.local_disk_directories(details, prefix)
 
             def show(local_rows):
-                rows = {row['name'].casefold(): row for row in remote_rows + local_rows}
+                rows = {self.directory_name_key(row['name']): row for row in remote_rows + local_rows}
                 finish([rows[name] for name in sorted(rows)], live=live, incomplete=incomplete, from_cache=from_cache)
 
             def failed(local_error):
@@ -948,6 +948,10 @@ class Window(QMainWindow):
                 self.update_directory_notice()
         else:
             complete(None, None)
+
+    @staticmethod
+    def directory_name_key(name):
+        return name.casefold() if sys.platform == 'win32' else name
 
     @staticmethod
     def local_disk_directories(config, prefix):
@@ -999,7 +1003,9 @@ class Window(QMainWindow):
                 for rule in self.base_rules:
                     if rule and not rule.startswith(('//', '#escape=')) and not any(c in rule for c in '*?[]{}()\\'):
                         blocked = rule.strip('/')
-                        matches = (path.casefold() == blocked.casefold() or path.casefold().startswith(blocked.casefold() + '/')) if rule.startswith('/') else blocked.casefold() in path.casefold().split('/')
+                        path_key = self.directory_name_key(path)
+                        blocked_key = self.directory_name_key(blocked)
+                        matches = (path_key == blocked_key or path_key.startswith(blocked_key + '/')) if rule.startswith('/') else blocked_key in path_key.split('/')
                         if matches:
                             item.setCheckState(0, Qt.CheckState.Unchecked)
                             item.setFlags(item.flags() & ~Qt.ItemFlag.ItemIsEnabled)
@@ -1138,18 +1144,18 @@ class Window(QMainWindow):
                         raise
                     rows = []
                 rows = rows + nas.get(parent, [])
-                directory_names = {row['name'].casefold() for row in rows
+                directory_names = {Window.directory_name_key(row['name']) for row in rows
                                    if row.get('type') == 'FILE_INFO_TYPE_DIRECTORY'}
                 names = {row['name'] for row in rows if row.get('type') == 'FILE_INFO_TYPE_FILE'}
                 names.update(path.rpartition('/')[2] for path in prior_files if path.rpartition('/')[0] == parent)
                 if local.is_dir() and not local.is_symlink():
                     for entry in local.iterdir():
                         if entry.is_dir():
-                            directory_names.add(entry.name.casefold())
+                            directory_names.add(Window.directory_name_key(entry.name))
                         elif entry.is_file() and not entry.is_symlink():
                             names.add(entry.name)
                 direct_files.extend('/'.join(filter(None, (parent, name))) for name in names
-                                    if name.casefold() not in directory_names
+                                    if Window.directory_name_key(name) not in directory_names
                                     and name.casefold() not in {'.stignore', '.stfolder', '.stversions'}
                                     and not name.casefold().startswith(('.syncthing.', '~syncthing~')))
         return direct_files

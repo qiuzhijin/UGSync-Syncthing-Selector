@@ -209,7 +209,14 @@ def test_directory_tree_uses_verified_nas_to_fill_missing_entries(monkeypatch, i
         window.close()
 
 
-def test_catalog_keeps_local_only_directories(monkeypatch, tmp_path):
+@pytest.mark.parametrize('platform,remote_name,expected', [
+    ('win32', 'NasOnly', {'LocalOnly', 'NasOnly'}),
+    ('linux', 'NasOnly', {'LocalOnly', 'NasOnly'}),
+    ('win32', 'localonly', {'LocalOnly'}),
+    ('linux', 'localonly', {'LocalOnly', 'localonly'}),
+])
+def test_catalog_keeps_local_only_directories(monkeypatch, tmp_path, platform, remote_name, expected):
+    import syncthing_bridge.__main__ as ui
     app = QApplication.instance() or QApplication([])
     window = Window()
     directory = 'FILE_INFO_TYPE_DIRECTORY'
@@ -223,13 +230,25 @@ def test_catalog_keeps_local_only_directories(monkeypatch, tmp_path):
     monkeypatch.setattr(window, 'read_nas_directories', lambda *args, **kwargs:
                         callbacks.append(args[2]) or True)
     try:
+        monkeypatch.setattr(ui.sys, 'platform', platform)
         window.populate(None, '', False)
-        callbacks.pop()({'': [{'name': 'NasOnly', 'type': directory}]}, None)
-        assert {window.tree.topLevelItem(i).text(0) for i in range(window.tree.topLevelItemCount())} == {
-            'LocalOnly', 'NasOnly'}
+        callbacks.pop()({'': [{'name': remote_name, 'type': directory}]}, None)
+        assert {window.tree.topLevelItem(i).text(0) for i in range(window.tree.topLevelItemCount())} == expected
     finally:
         window.exiting = True
         window.close()
+
+
+@pytest.mark.parametrize('platform,expected', [('win32', []), ('linux', ['report'])])
+def test_direct_files_distinguish_linux_case_sensitive_directory_names(monkeypatch, tmp_path, platform, expected):
+    import syncthing_bridge.__main__ as ui
+
+    monkeypatch.setattr(ui.sys, 'platform', platform)
+    api = SimpleNamespace(folders=lambda: [{'id': 'test', 'path': str(tmp_path)}],
+                          browse=lambda *args, **kwargs: [
+                              {'name': 'Report', 'type': 'FILE_INFO_TYPE_DIRECTORY'},
+                              {'name': 'report', 'type': 'FILE_INFO_TYPE_FILE'}])
+    assert Window.read_direct_files(api, 'test', [''], {}, [], False) == expected
 
 
 def test_slow_local_browse_is_dispatched_off_the_gui_thread(monkeypatch):

@@ -3,7 +3,7 @@
 此 `.deb` 面向 Ubuntu 24.04 LTS 桌面版、Intel/AMD 64 位（`amd64`），包含 Qt 桌面客户端和 Syncthing 2.1.7。安装时由 APT 处理系统依赖。
 
 ```bash
-sudo apt install ./ugsync-selector_0.1.45_amd64.deb
+sudo apt install ./ugsync-selector_0.1.47_amd64.deb
 ugsync-selector
 ```
 

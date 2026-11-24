@@ -19,6 +19,17 @@ MAX_RESPONSE = 2 << 20
 ENTRY_TYPES = {'FILE_INFO_TYPE_DIRECTORY', 'FILE_INFO_TYPE_FILE'}
 
 
+def validate_rows(rows, directories_only):
+    if not isinstance(rows, list):
+        raise ValueError()
+    for row in rows:
+        name, kind = row['name'], row['type']
+        if ('/' in normalize(name) or ':' in name or kind not in ENTRY_TYPES or
+                (directories_only and kind != 'FILE_INFO_TYPE_DIRECTORY')):
+            raise ValueError()
+    return rows
+
+
 class Catalog:
     def __init__(self, endpoint, token, cache):
         address = urlsplit(endpoint)
@@ -55,8 +66,8 @@ class Catalog:
             with closing(sqlite3.connect(self.cache, timeout=.1)) as db:
                 row = db.execute('SELECT entries FROM listings WHERE key=?',
                                  (self.cache_key(folder, prefix),)).fetchone()
-            return json.loads(row[0]) if row is not None else None
-        except (sqlite3.Error, ValueError):
+            return validate_rows(json.loads(row[0]), True) if row is not None else None
+        except (sqlite3.Error, ValueError, KeyError, TypeError):
             return None
 
     def save_cache(self, folder, prefix, rows):
@@ -88,14 +99,9 @@ class Catalog:
                         raise ValueError()
                     payload.extend(chunk)
             data = json.loads(payload)
-            if data['folder'] != folder or data['prefix'] != prefix or not isinstance(data['entries'], list):
+            if data['folder'] != folder or data['prefix'] != prefix:
                 raise ValueError()
-            rows = data['entries']
-            for row in rows:
-                name, kind = row['name'], row['type']
-                if ('/' in normalize(name) or ':' in name or kind not in ENTRY_TYPES or
-                        (directories_only and kind != 'FILE_INFO_TYPE_DIRECTORY')):
-                    raise ValueError()
+            rows = validate_rows(data['entries'], directories_only)
         except (httpx.HTTPError, ValueError, KeyError, TypeError):
             raise SyncthingError('NAS 目录服务暂时无法读取') from None
         if directories_only:

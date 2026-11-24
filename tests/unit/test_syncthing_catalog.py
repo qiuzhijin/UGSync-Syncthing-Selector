@@ -61,3 +61,11 @@ def test_catalog_rejects_links_to_paths_outside_the_share(tmp_path):
 def test_catalog_requires_https_outside_loopback(tmp_path):
     with pytest.raises(ValueError, match='HTTPS'):
         Catalog('http://192.0.2.1:8788', 'synthetic-test-token-for-catalog-only', tmp_path / 'cache.sqlite')
+
+
+@pytest.mark.parametrize('rows', [{}, [None], [{'name': '../bad', 'type': 'FILE_INFO_TYPE_DIRECTORY'}],
+                                  [{'name': 'file', 'type': 'FILE_INFO_TYPE_FILE'}]])
+def test_invalid_cached_listing_is_a_cache_miss(tmp_path, rows):
+    source = Catalog('http://127.0.0.1:8788', 'synthetic-test-token-for-catalog-only', tmp_path / 'cache.sqlite')
+    source.save_cache('drive', '', rows)
+    assert source.cached('drive', '') is None
