@@ -5,15 +5,15 @@
     <link>https://github.com/qiuzhijin/UGSync-Syncthing-Selector/releases</link>
     <description>UGSync Syncthing Selector preview updates</description>
     <item>
-      <title>UGSync v50</title>
-      <sparkle:version>50</sparkle:version>
-      <sparkle:shortVersionString>v50</sparkle:shortVersionString>
+      <title>UGSync v51</title>
+      <sparkle:version>51</sparkle:version>
+      <sparkle:shortVersionString>v51</sparkle:shortVersionString>
       <enclosure
-        url="https://github.com/qiuzhijin/UGSync-Syncthing-Selector/releases/download/v0.1.50/UGSync-Setup-v0.1.50-x64.exe"
-        length="45896729"
+        url="https://github.com/qiuzhijin/UGSync-Syncthing-Selector/releases/download/v0.1.51/UGSync-Setup-v0.1.51-x64.exe"
+        length="45914079"
         type="application/octet-stream"
         sparkle:os="windows-x64"
-        sparkle:edSignature="14LeHDjyI7WaAnukfTigYDDTx48jdKgfawJ7J9Hmja9LkZ1HerDNL40J97/ILp98TL9ub0OC9lv3smyJfNDKAw==" />
+        sparkle:edSignature="2qkU66Df/GMCuTo8zHd0HL40RMyYv2eE5MFBdo4vlhLOfr+wAP1UvCw4ga7kX9XLjq06p/l5E3njp27bS1lBBg==" />
     </item>
   </channel>
 </rss>
